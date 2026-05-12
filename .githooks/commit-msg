@@ -1,0 +1,17 @@
+#!/usr/bin/env sh
+# Validates conventional commits format: https://www.conventionalcommits.org
+
+commit_msg=$(cat "$1")
+pattern='^(feat|fix|docs|style|refactor|perf|test|build|ci|chore|revert)(\([^)]+\))?(!)?: .+'
+
+if ! echo "$commit_msg" | grep -qE "$pattern"; then
+  echo "ERROR: commit message does not follow Conventional Commits format."
+  echo ""
+  echo "  Expected: <type>[optional scope]: <description>"
+  echo "  Example:  feat(login): add OAuth support"
+  echo ""
+  echo "  Types: feat, fix, docs, style, refactor, perf, test, build, ci, chore, revert"
+  echo ""
+  echo "  Got: $commit_msg"
+  exit 1
+fi

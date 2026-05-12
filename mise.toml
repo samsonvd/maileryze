@@ -1,5 +1,6 @@
 [tools]
 go = "1.26"
+"github:caarlos0/svu" = "latest"
 
 [tasks.run]
 description = "Run the CLI"
@@ -16,3 +17,25 @@ run = "go test ./..."
 [tasks.lint]
 description = "Vet the code"
 run = "go vet ./..."
+
+[tasks.setup]
+description = "Configure git to use project hooks"
+run = "git config core.hooksPath .githooks"
+
+[tasks.version]
+description = "Show current and next version"
+run = """
+echo "current: $(svu current)"
+echo "next:    $(svu next)"
+"""
+
+[tasks.release]
+description = "Tag and push a new release (uses svu to determine next version)"
+run = """
+set -e
+next=$(svu next)
+echo "Releasing $next"
+git tag "$next"
+git push orgin HEAD
+git push "$next"
+"""
