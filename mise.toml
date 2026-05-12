@@ -1,0 +1,18 @@
+[tools]
+go = "1.26"
+
+[tasks.run]
+description = "Run the CLI"
+run = "go run ./main.go {{arg()}}"
+
+[tasks.build]
+description = "Build the binary"
+run = "go build -o maileryze ./..."
+
+[tasks.test]
+description = "Run tests"
+run = "go test ./..."
+
+[tasks.lint]
+description = "Vet the code"
+run = "go vet ./..."
