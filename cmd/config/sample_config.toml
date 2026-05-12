@@ -1,0 +1,11 @@
+[global]
+
+[[providers]]
+# How you refer to the provider
+alias = 'gmail'
+
+# The mechanism of getting email. Supported types: gmail
+provider = 'gmail'
+
+# Your email address
+address = ''
