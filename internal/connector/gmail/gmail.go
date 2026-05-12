@@ -4,9 +4,13 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net"
+	"net/http"
 	"net/mail"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 
@@ -181,15 +185,56 @@ func (g *GmailConnector) saveToken(t *oauth2.Token) error {
 	return json.NewEncoder(f).Encode(t)
 }
 
-// authorize runs the OAuth2 authorization code flow interactively.
-// The user opens a URL, grants access, and pastes back the code.
+// authorize runs the OAuth2 loopback redirect flow: starts a local HTTP server
+// on a random port, opens the browser, and waits for Google to redirect back
+// with the authorization code.
 func (g *GmailConnector) authorize() (*oauth2.Token, error) {
-	authURL := g.oauthConf.AuthCodeURL("state-token", oauth2.AccessTypeOffline)
-	fmt.Printf("Open this URL in your browser to authorize access:\n\n  %s\n\nEnter the authorization code: ", authURL)
-
-	var code string
-	if _, err := fmt.Scan(&code); err != nil {
-		return nil, fmt.Errorf("reading authorization code: %w", err)
+	listener, err := net.Listen("tcp", "localhost:0")
+	if err != nil {
+		return nil, fmt.Errorf("starting callback server: %w", err)
 	}
-	return g.oauthConf.Exchange(context.Background(), code)
+	port := listener.Addr().(*net.TCPAddr).Port
+
+	g.oauthConf.RedirectURL = fmt.Sprintf("http://localhost:%d/callback", port)
+	authURL := g.oauthConf.AuthCodeURL("state-token", oauth2.AccessTypeOffline)
+
+	codeCh := make(chan string, 1)
+
+	mux := http.NewServeMux()
+	srv := &http.Server{Handler: mux}
+	mux.HandleFunc("/callback", func(w http.ResponseWriter, r *http.Request) {
+		code := r.URL.Query().Get("code")
+		if code != "" {
+			fmt.Fprint(w, "<html><body><p>Authorization successful — you can close this tab.</p></body></html>")
+		} else {
+			fmt.Fprintf(w, "<html><body><p>Authorization failed: %s</p></body></html>", r.URL.Query().Get("error"))
+		}
+		codeCh <- code
+	})
+	go srv.Serve(listener)                   //nolint:errcheck
+	defer srv.Shutdown(context.Background()) //nolint:errcheck
+
+	fmt.Println("Opening browser for Gmail authorization...")
+	if err := openBrowser(authURL); err != nil {
+		fmt.Printf("Could not open browser automatically. Visit this URL:\n\n  %s\n\n", authURL)
+	}
+
+	select {
+	case code := <-codeCh:
+		if code == "" {
+			return nil, fmt.Errorf("authorization denied or failed")
+		}
+		return g.oauthConf.Exchange(context.Background(), code)
+	case <-time.After(5 * time.Minute):
+		return nil, fmt.Errorf("authorization timed out")
+	}
+}
+
+func openBrowser(url string) error {
+	switch runtime.GOOS {
+	case "darwin":
+		return exec.Command("open", url).Start()
+	default:
+		return fmt.Errorf("unsupported platform: %s", runtime.GOOS)
+	}
 }
