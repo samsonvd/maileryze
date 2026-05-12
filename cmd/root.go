@@ -37,7 +37,7 @@ func Execute() {
 func init() {
 	cobra.OnInitialize(initConfig)
 
-	rootCmd.PersistentFlags().StringVar(&cfgFile, "config", "", "config file (default is $HOME/.config/maileryze.toml)")
+	rootCmd.PersistentFlags().StringVar(&cfgFile, "config", "", "config file (default is $HOME/.config/maileryze/maileryze.toml)")
 	rootCmd.PersistentFlags().StringP("alias", "a", "", "Email provider alias from your config file.")
 
 	rootCmd.AddCommand(config.NewCmd())
@@ -50,7 +50,7 @@ func initConfig() {
 		viper.SetConfigFile(cfgFile)
 		log.Printf("Reading config from %s", viper.ConfigFileUsed())
 	} else {
-		viper.AddConfigPath(cfg.DefaultConfigPath())
+		viper.AddConfigPath(cfg.DataDir())
 		viper.AddConfigPath(".")
 		viper.SetConfigType("toml")
 		viper.SetConfigName(cfg.ConfigFileStub)

@@ -27,11 +27,7 @@ Entry point: `main.go` → `cmd.Execute()` (`cmd/root.go`)
 
 TOML format. Viper searches in order:
 1. `--config` flag (explicit path)
-2. `~/.config/maileryze.toml`
+2. `~/.config/maileryze/maileryze.toml`
 3. `./maileryze.toml`
 
-Config struct defined in `cmd/types.go`.
-
-## Gotchas
-
-- `EmailProvider` fields in `cmd/types.go` are unexported (`address`, `alias`, `provider`). `mapstructure` cannot decode into unexported fields, so `loadConfig()` silently returns empty providers. Fields must be exported and tagged (`mapstructure:"..."`) to work.
+Config struct: `internal/cfg.AppConfig`. All app data (config, tokens, credentials) lives under `~/.config/maileryze/`.

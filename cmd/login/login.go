@@ -3,6 +3,7 @@ package login
 import (
 	"fmt"
 	"log"
+	"maileryze/internal/factory"
 
 	"github.com/spf13/cobra"
 
@@ -24,7 +25,14 @@ func NewCmd() *cobra.Command {
 			cobra.CheckErr(err)
 
 			log.Println("Using alias:", alias)
-			fmt.Println(provider)
+
+			conn, err := factory.NewConnector(*provider)
+			cobra.CheckErr(err)
+
+			err = conn.Login()
+			cobra.CheckErr(err)
+
+			fmt.Println("Connection successful")
 		},
 	}
 }

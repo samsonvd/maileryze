@@ -1,7 +1,6 @@
 package connector
 
 import (
-	"maileryze/internal/types"
 	"time"
 )
 
@@ -10,7 +9,10 @@ type EmailSender struct {
 	Address string
 }
 
-type UnsubscribeMechanism struct{}
+type UnsubscribeMechanism struct {
+	Email string // mailto: address from List-Unsubscribe header
+	URL   string // HTTP URL from List-Unsubscribe header
+}
 
 type ProviderDetails[T any] struct {
 	Identifier string
@@ -26,7 +28,6 @@ type EmailContent[T any] struct {
 
 type Connector[T any] interface {
 	Login() error
-
 	Fetch(start, end time.Time) ([]EmailContent[T], error)
 }
 
@@ -36,13 +37,6 @@ func (c *NilConnector) Login() error {
 	return nil
 }
 
-func (c *NilConnector) Fetch(start, end time.Time) ([]EmailContent[string], error) {
-	return []EmailContent[string]{}, nil
-}
-
-func ConnectorFactory(provider types.Provider) *Connector[any] {
-	if provider == types.ProviderGmail {
-
-	}
-	return &NilConnector{}
+func (c *NilConnector) Fetch(start, end time.Time) ([]EmailContent[any], error) {
+	return []EmailContent[any]{}, nil
 }
