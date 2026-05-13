@@ -8,7 +8,7 @@ import (
 
 const ConfigFileStub = "maileryze"
 const ConfigFileName = "maileryze.toml"
-const DatabaseFileName = "maileryze.db"
+const DatabaseFileName = "userdata.db"
 
 // DataDir returns the directory used for all app data (config, tokens, credentials).
 func DataDir() string {

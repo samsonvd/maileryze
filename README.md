@@ -132,6 +132,6 @@ All app data is stored under `~/.config/maileryze/`:
 | Path | Contents |
 |------|----------|
 | `maileryze.toml` | Configuration |
-| `maileryze.db` | Local email database (SQLite) |
+| `userdata.db` | Local email database (SQLite) |
 | `credentials.json` | OAuth2 client credentials |
 | `tokens/<alias>.json` | Cached OAuth2 tokens |
