@@ -34,22 +34,38 @@ func GetStats(db *sql.DB) (*Stats, error) {
 	for rows.Next() {
 		var alias, provider string
 		var count int
-		var oldest, newest, lastFetch sql.NullTime
+		var oldest, newest, lastFetch sql.NullString
 		if err := rows.Scan(&alias, &provider, &count, &oldest, &newest, &lastFetch); err != nil {
 			return nil, err
 		}
 		s := AliasStats{Provider: provider, Count: count}
 		if oldest.Valid {
-			s.OldestEmail = oldest.Time
+			s.OldestEmail, _ = parseTime(oldest.String)
 		}
 		if newest.Valid {
-			s.NewestEmail = newest.Time
+			s.NewestEmail, _ = parseTime(newest.String)
 		}
 		if lastFetch.Valid {
-			s.LastFetchedAt = lastFetch.Time
+			s.LastFetchedAt, _ = parseTime(lastFetch.String)
 		}
 		stats.Aliases[alias] = s
 	}
 
 	return stats, nil
+}
+
+var timeFormats = []string{
+	time.RFC3339Nano,
+	time.RFC3339,
+	"2006-01-02 15:04:05",
+	"2006-01-02T15:04:05",
+}
+
+func parseTime(s string) (time.Time, error) {
+	for _, f := range timeFormats {
+		if t, err := time.Parse(f, s); err == nil {
+			return t, nil
+		}
+	}
+	return time.Time{}, fmt.Errorf("unable to parse time: %q", s)
 }

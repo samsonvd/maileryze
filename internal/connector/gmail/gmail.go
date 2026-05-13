@@ -99,7 +99,7 @@ func (g *GmailConnector) Fetch(ctx context.Context, start, end time.Time) <-chan
 					}
 					msg, err := g.service.Users.Messages.Get("me", m.Id).
 						Format("metadata").
-						MetadataHeaders("Subject", "From", "List-Unsubscribe", "Date").
+						MetadataHeaders("Subject", "From", "List-Unsubscribe").
 						Do()
 					if err != nil {
 						return fmt.Errorf("fetching message %s: %w", m.Id, err)
@@ -122,12 +122,11 @@ func parseMessage(msg *googleGmail.Message) connector.EmailContent[any] {
 	for _, h := range msg.Payload.Headers {
 		headers[h.Name] = h.Value
 	}
-	receivedAt, _ := mail.ParseDate(headers["Date"])
 	return connector.EmailContent[any]{
 		Subject:     headers["Subject"],
 		Sender:      parseSender(headers["From"]),
 		Unsubscribe: parseUnsubscribe(headers["List-Unsubscribe"]),
-		ReceivedAt:  receivedAt,
+		ReceivedAt:  time.UnixMilli(msg.InternalDate).UTC(),
 		Provider: connector.ProviderDetails[any]{
 			Identifier: msg.Id,
 			Data: MessageData{

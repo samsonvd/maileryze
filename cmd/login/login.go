@@ -2,37 +2,31 @@ package login
 
 import (
 	"fmt"
-	"log"
-	"maileryze/internal/factory"
 
 	"github.com/spf13/cobra"
 
-	"maileryze/internal/cfg"
+	"maileryze/internal/factory"
 )
 
 func NewCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "login",
 		Short: "Login to an email provider",
-		Run: func(cmd *cobra.Command, args []string) {
+		RunE: func(cmd *cobra.Command, args []string) error {
 			alias, err := cmd.Root().PersistentFlags().GetString("alias")
-			cobra.CheckErr(err)
+			if err != nil {
+				return err
+			}
 			if alias == "" {
-				cobra.CheckErr("You must provide an alias")
+				return fmt.Errorf("--alias is required")
 			}
 
-			provider, err := cfg.ProviderByAlias(alias)
-			cobra.CheckErr(err)
+			_, _, err = factory.Connect(alias)
+			if err != nil {
+				return err
+			}
 
-			log.Println("Using alias:", alias)
-
-			conn, err := factory.NewConnector(*provider)
-			cobra.CheckErr(err)
-
-			err = conn.Login()
-			cobra.CheckErr(err)
-
-			fmt.Println("Connection successful")
+			return nil
 		},
 	}
 }

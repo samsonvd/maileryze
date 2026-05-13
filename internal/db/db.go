@@ -5,6 +5,7 @@ import (
 	"embed"
 	"fmt"
 	"os"
+	"time"
 
 	"github.com/pressly/goose/v3"
 	_ "modernc.org/sqlite"
@@ -59,7 +60,7 @@ func InsertEmail(db *sql.DB, alias, provider string, email connector.EmailConten
 		email.Unsubscribe.URL,
 		provider,
 		email.Provider.Identifier,
-		email.ReceivedAt,
+		email.ReceivedAt.UTC().Format(time.RFC3339),
 	)
 	if err != nil {
 		return false, err

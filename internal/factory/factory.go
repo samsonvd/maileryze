@@ -11,6 +11,23 @@ import (
 	"maileryze/internal/types"
 )
 
+// Connect looks up the provider by alias, creates the connector, and logs in.
+func Connect(alias string) (connector.Connector[any], *types.EmailProvider, error) {
+	provider, err := cfg.ProviderByAlias(alias)
+	if err != nil {
+		return nil, nil, err
+	}
+	conn, err := NewConnector(*provider)
+	if err != nil {
+		return nil, nil, err
+	}
+	if err := conn.Login(); err != nil {
+		return nil, nil, err
+	}
+	fmt.Printf("[%s] Login successful\n", alias)
+	return conn, provider, nil
+}
+
 // NewConnector returns a Connector for the given provider. For Gmail, it reads
 // OAuth2 credentials from DataDir()/credentials.json.
 func NewConnector(p types.EmailProvider) (connector.Connector[any], error) {

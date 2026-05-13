@@ -2,7 +2,6 @@ package load
 
 import (
 	"fmt"
-	"maileryze/internal/cfg"
 	"maileryze/internal/db"
 	"maileryze/internal/factory"
 	"time"
@@ -42,17 +41,8 @@ The fetched data is: subject, sender, unsubscribe mechanism, unsubscribe info, p
 				return fmt.Errorf("--end (%s) must be after --start (%s)", end.Format(dateLayout), start.Format(dateLayout))
 			}
 
-			provider, err := cfg.ProviderByAlias(alias)
+			conn, provider, err := factory.Connect(alias)
 			if err != nil {
-				return err
-			}
-
-			conn, err := factory.NewConnector(*provider)
-			if err != nil {
-				return err
-			}
-
-			if err := conn.Login(); err != nil {
 				return err
 			}
 

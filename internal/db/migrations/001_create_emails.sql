@@ -1,6 +1,7 @@
 -- +goose Up
 CREATE TABLE emails (
     id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+    alias               TEXT NOT NULL,
     subject             TEXT NOT NULL,
     sender_name         TEXT NOT NULL,
     sender_address      TEXT NOT NULL,
@@ -11,7 +12,7 @@ CREATE TABLE emails (
     received_at         DATETIME NOT NULL,
     fetched_at          DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
 
-    UNIQUE (provider, provider_identifier)
+    UNIQUE (alias, provider, provider_identifier)
 );
 
 -- +goose Down
