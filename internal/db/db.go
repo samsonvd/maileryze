@@ -44,13 +44,14 @@ func Open() (*sql.DB, error) {
 }
 
 // InsertEmail inserts an email into the database. Duplicates (matched by
-// provider + provider_identifier) are silently ignored.
+// alias + provider + provider_identifier) are silently ignored.
 // Returns true if the row was newly inserted, false if it already existed.
-func InsertEmail(db *sql.DB, provider string, email connector.EmailContent[any]) (bool, error) {
+func InsertEmail(db *sql.DB, alias, provider string, email connector.EmailContent[any]) (bool, error) {
 	result, err := db.Exec(`
 		INSERT OR IGNORE INTO emails
-			(subject, sender_name, sender_address, unsubscribe_email, unsubscribe_url, provider, provider_identifier, received_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+			(alias, subject, sender_name, sender_address, unsubscribe_email, unsubscribe_url, provider, provider_identifier, received_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		alias,
 		email.Subject,
 		email.Sender.Name,
 		email.Sender.Address,

@@ -67,7 +67,7 @@ The fetched data is: subject, sender, unsubscribe mechanism, unsubscribe info, p
 				if result.Err != nil {
 					return result.Err
 				}
-				isNew, err := db.InsertEmail(database, string(provider.Provider), result.Value)
+				isNew, err := db.InsertEmail(database, provider.Alias, string(provider.Provider), result.Value)
 				if err != nil {
 					return err
 				}
@@ -84,5 +84,6 @@ The fetched data is: subject, sender, unsubscribe mechanism, unsubscribe info, p
 	cmd.Flags().StringP("start", "s", "", "Start date, inclusive (YYYY-MM-DD)")
 	cmd.Flags().StringP("end", "e", "", "End date, exclusive (YYYY-MM-DD, defaults to today)")
 	cobra.CheckErr(cmd.MarkFlagRequired("start"))
+	cmd.AddCommand(newInspectCmd())
 	return cmd
 }
