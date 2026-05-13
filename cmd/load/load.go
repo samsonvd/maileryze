@@ -3,6 +3,7 @@ package load
 import (
 	"fmt"
 	"maileryze/internal/cfg"
+	"maileryze/internal/db"
 	"maileryze/internal/factory"
 	"time"
 
@@ -55,15 +56,28 @@ The fetched data is: subject, sender, unsubscribe mechanism, unsubscribe info, p
 				return err
 			}
 
-			results := 0
+			database, err := db.Open()
+			if err != nil {
+				return err
+			}
+			defer database.Close()
+
+			inserted, skipped := 0, 0
 			for result := range conn.Fetch(cmd.Context(), start, end) {
 				if result.Err != nil {
 					return result.Err
 				}
-				results++
-				fmt.Println(result.Value.Subject)
+				isNew, err := db.InsertEmail(database, string(provider.Provider), result.Value)
+				if err != nil {
+					return err
+				}
+				if isNew {
+					inserted++
+				} else {
+					skipped++
+				}
 			}
-			fmt.Println("results fetched:", results)
+			fmt.Printf("Done: %d inserted, %d already existed\n", inserted, skipped)
 			return nil
 		},
 	}

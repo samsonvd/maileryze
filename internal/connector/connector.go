@@ -25,6 +25,7 @@ type EmailContent[T any] struct {
 	Sender      EmailSender
 	Unsubscribe UnsubscribeMechanism
 	Provider    ProviderDetails[T]
+	ReceivedAt  time.Time
 }
 
 type Result[T any] struct {
