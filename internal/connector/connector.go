@@ -1,6 +1,7 @@
 package connector
 
 import (
+	"context"
 	"time"
 )
 
@@ -26,9 +27,14 @@ type EmailContent[T any] struct {
 	Provider    ProviderDetails[T]
 }
 
+type Result[T any] struct {
+	Value T
+	Err   error
+}
+
 type Connector[T any] interface {
 	Login() error
-	Fetch(start, end time.Time) ([]EmailContent[T], error)
+	Fetch(ctx context.Context, start, end time.Time) <-chan Result[EmailContent[T]]
 }
 
 type NilConnector struct{}
@@ -37,6 +43,8 @@ func (c *NilConnector) Login() error {
 	return nil
 }
 
-func (c *NilConnector) Fetch(start, end time.Time) ([]EmailContent[any], error) {
-	return []EmailContent[any]{}, nil
+func (c *NilConnector) Fetch(ctx context.Context, start, end time.Time) <-chan Result[EmailContent[any]] {
+	ch := make(chan Result[EmailContent[any]])
+	close(ch)
+	return ch
 }

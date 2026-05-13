@@ -74,38 +74,47 @@ func (g *GmailConnector) Login() error {
 	return nil
 }
 
-// Fetch retrieves all messages in the given time window and returns their
-// metadata. Only subject, sender, and unsubscribe headers are fetched.
-func (g *GmailConnector) Fetch(start, end time.Time) ([]connector.EmailContent[any], error) {
-	if g.service == nil {
-		return nil, fmt.Errorf("not logged in: call Login() first")
-	}
+// Fetch streams messages in the given time window, one per channel send.
+// The channel is closed when all pages are exhausted or ctx is cancelled.
+func (g *GmailConnector) Fetch(ctx context.Context, start, end time.Time) <-chan connector.Result[connector.EmailContent[any]] {
+	ch := make(chan connector.Result[connector.EmailContent[any]])
 
-	query := fmt.Sprintf("after:%s before:%s",
-		start.Format("2006/01/02"),
-		end.Format("2006/01/02"))
+	go func() {
+		defer close(ch)
 
-	var results []connector.EmailContent[any]
-	err := g.service.Users.Messages.List("me").Q(query).Pages(
-		context.Background(),
-		func(page *googleGmail.ListMessagesResponse) error {
-			for _, m := range page.Messages {
-				msg, err := g.service.Users.Messages.Get("me", m.Id).
-					Format("metadata").
-					MetadataHeaders("Subject", "From", "List-Unsubscribe").
-					Do()
-				if err != nil {
-					return fmt.Errorf("fetching message %s: %w", m.Id, err)
+		if g.service == nil {
+			ch <- connector.Result[connector.EmailContent[any]]{Err: fmt.Errorf("not logged in: call Login() first")}
+			return
+		}
+
+		query := fmt.Sprintf("after:%s before:%s",
+			start.Format("2006/01/02"),
+			end.Format("2006/01/02"))
+
+		err := g.service.Users.Messages.List("me").Q(query).Pages(ctx,
+			func(page *googleGmail.ListMessagesResponse) error {
+				for _, m := range page.Messages {
+					if ctx.Err() != nil {
+						return ctx.Err()
+					}
+					msg, err := g.service.Users.Messages.Get("me", m.Id).
+						Format("metadata").
+						MetadataHeaders("Subject", "From", "List-Unsubscribe").
+						Do()
+					if err != nil {
+						return fmt.Errorf("fetching message %s: %w", m.Id, err)
+					}
+					ch <- connector.Result[connector.EmailContent[any]]{Value: parseMessage(msg)}
 				}
-				results = append(results, parseMessage(msg))
-			}
-			return nil
-		},
-	)
-	if err != nil {
-		return nil, fmt.Errorf("listing messages: %w", err)
-	}
-	return results, nil
+				return nil
+			},
+		)
+		if err != nil {
+			ch <- connector.Result[connector.EmailContent[any]]{Err: fmt.Errorf("listing messages: %w", err)}
+		}
+	}()
+
+	return ch
 }
 
 func parseMessage(msg *googleGmail.Message) connector.EmailContent[any] {

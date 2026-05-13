@@ -18,7 +18,7 @@ func NewCmd() *cobra.Command {
 		Long: `Connect to the email source and download email data to local storage.
 The fetched data is: subject, sender, unsubscribe mechanism, unsubscribe info, provider, provider identifier`,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			alias, err := cmd.PersistentFlags().GetString("alias")
+			alias, err := cmd.Root().PersistentFlags().GetString("alias")
 			if err != nil {
 				return err
 			}
@@ -55,21 +55,20 @@ The fetched data is: subject, sender, unsubscribe mechanism, unsubscribe info, p
 				return err
 			}
 
-			emails, err := conn.Fetch(start, end)
-			if err != nil {
-				return err
+			results := 0
+			for result := range conn.Fetch(cmd.Context(), start, end) {
+				if result.Err != nil {
+					return result.Err
+				}
+				results++
+				fmt.Println(result.Value.Subject)
 			}
-
-			for _, email := range emails {
-				fmt.Println(email.Subject)
-			}
+			fmt.Println("results fetched:", results)
 			return nil
 		},
 	}
-	cmd.Flags().StringP("alias", "a", "", "Email provider alias from your config file")
 	cmd.Flags().StringP("start", "s", "", "Start date, inclusive (YYYY-MM-DD)")
 	cmd.Flags().StringP("end", "e", "", "End date, exclusive (YYYY-MM-DD, defaults to today)")
 	cobra.CheckErr(cmd.MarkFlagRequired("start"))
-	cobra.CheckErr(cmd.MarkFlagRequired("alias"))
 	return cmd
 }
