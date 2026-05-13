@@ -36,6 +36,8 @@ func newInspectCmd() *cobra.Command {
 				return nil
 			}
 
+			fmt.Println("Database found:", cfg.DbFilePath())
+
 			for alias, s := range stats.Aliases {
 				fmt.Printf("[%s] (%s)\n", alias, s.Provider)
 				fmt.Printf("  Records:      %d\n", s.Count)
