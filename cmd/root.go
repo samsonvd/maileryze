@@ -10,6 +10,7 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 
+	"maileryze/cmd/analyze"
 	"maileryze/cmd/config"
 	"maileryze/cmd/load"
 	"maileryze/cmd/login"
@@ -40,6 +41,7 @@ func init() {
 	rootCmd.PersistentFlags().StringVar(&cfgFile, "config", "", "config file (default is $HOME/.config/maileryze/maileryze.toml)")
 	rootCmd.PersistentFlags().StringP("alias", "a", "", "Email provider alias from your config file.")
 
+	rootCmd.AddCommand(analyze.NewCmd())
 	rootCmd.AddCommand(config.NewCmd())
 	rootCmd.AddCommand(load.NewCmd())
 	rootCmd.AddCommand(login.NewCmd())
