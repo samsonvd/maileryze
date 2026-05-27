@@ -325,12 +325,16 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.setStatus("sync error: "+msg.err.Error(), true)
 			return m, nil
 		}
-		m.sy.loaded = msg.loaded
-		m.sy.inserted = msg.inserted
+		// Intermediate messages always carry valid counts; a done message from
+		// a channel close has zero counts — keep the last tracked values.
+		if !msg.done || msg.loaded > 0 {
+			m.sy.loaded = msg.loaded
+			m.sy.inserted = msg.inserted
+		}
 		if msg.done {
 			m.sy.running = false
 			m.sy.done = true
-			m.setStatus(fmt.Sprintf("sync complete — %d loaded, %d new", msg.loaded, msg.inserted), false)
+			m.setStatus(fmt.Sprintf("sync complete — %d loaded, %d new", m.sy.loaded, m.sy.inserted), false)
 		} else if m.sy.ch != nil {
 			return m, waitForSyncMsg(m.sy.ch)
 		}
@@ -501,6 +505,11 @@ func countPending(senders []db.Sender, decisions map[string]db.SenderDecision) i
 }
 
 func renderStatusBar(m model) string {
+	// Show a live sync indicator on every screen except the sync screen itself.
+	if m.sy.running && m.screen != screenSync {
+		msg := fmt.Sprintf("%s syncing %s… %s loaded", m.sy.sp.View(), m.sy.alias, fmtInt(m.sy.loaded))
+		return mutedStyle.Render(msg)
+	}
 	if m.status == "" {
 		return ""
 	}
@@ -594,12 +603,21 @@ func loadDetailCmd(database *sql.DB, alias, senderAddress string) tea.Cmd {
 
 func waitForSyncMsg(ch chan syncProgressMsg) tea.Cmd {
 	return func() tea.Msg {
-		return <-ch
+		msg, ok := <-ch
+		if !ok {
+			// Channel closed by goroutine — sync finished (or was abandoned).
+			return syncProgressMsg{done: true}
+		}
+		return msg
 	}
 }
 
 func startSyncGoroutine(conn connector.WritableConnector, database *sql.DB, alias, providerStr string, preset syncPreset, ch chan syncProgressMsg) {
 	go func() {
+		// Always close the channel on exit so waitForSyncMsg terminates even
+		// if the polling chain was broken (e.g. user navigated away).
+		defer close(ch)
+
 		ctx := context.Background()
 		start, end := syncDateRange(preset)
 		fetchCh := conn.Fetch(ctx, start, end)
@@ -607,12 +625,20 @@ func startSyncGoroutine(conn connector.WritableConnector, database *sql.DB, alia
 		loaded, inserted := 0, 0
 		for result := range fetchCh {
 			if result.Err != nil {
-				ch <- syncProgressMsg{err: result.Err, done: true}
+				// Non-blocking: if chain is broken the message is dropped but
+				// defer close(ch) still signals done.
+				select {
+				case ch <- syncProgressMsg{err: result.Err, done: true}:
+				default:
+				}
 				return
 			}
 			isNew, err := db.InsertEmail(database, alias, providerStr, result.Value)
 			if err != nil {
-				ch <- syncProgressMsg{err: err, done: true}
+				select {
+				case ch <- syncProgressMsg{err: err, done: true}:
+				default:
+				}
 				return
 			}
 			loaded++
@@ -620,10 +646,17 @@ func startSyncGoroutine(conn connector.WritableConnector, database *sql.DB, alia
 				inserted++
 			}
 			if loaded%50 == 0 {
-				ch <- syncProgressMsg{loaded: loaded, inserted: inserted}
+				select {
+				case ch <- syncProgressMsg{loaded: loaded, inserted: inserted}:
+				default:
+				}
 			}
 		}
-		ch <- syncProgressMsg{loaded: loaded, inserted: inserted, done: true}
+		// Final progress — non-blocking; channel close handles done signal.
+		select {
+		case ch <- syncProgressMsg{loaded: loaded, inserted: inserted, done: true}:
+		default:
+		}
 	}()
 }
 

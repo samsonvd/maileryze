@@ -67,6 +67,11 @@ func (m model) enterSenders(alias string) (model, tea.Cmd) {
 }
 
 func (m model) enterSync(alias string) (model, tea.Cmd) {
+	// If sync is already running for this alias, just navigate back to watch it.
+	if m.sy.running && m.sy.alias == alias {
+		m.screen = screenSync
+		return m, nil
+	}
 	m.sy.alias = alias
 	m.sy.preset = preset90Days
 	m.sy.running = false

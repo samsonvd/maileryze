@@ -12,10 +12,8 @@ func (m model) updateSync(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.KeyMsg:
 		switch msg.String() {
 		case "q", "esc":
-			if !m.sy.running {
-				m.screen = screenOverview
-				return m, loadOverviewCmd(m.database, m.appConfig)
-			}
+			m.screen = screenOverview
+			return m, loadOverviewCmd(m.database, m.appConfig)
 		case "up", "k":
 			if !m.sy.running && m.sy.preset > 0 {
 				m.sy.preset--
