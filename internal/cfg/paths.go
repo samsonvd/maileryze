@@ -1,6 +1,7 @@
 package cfg
 
 import (
+	"fmt"
 	"log"
 	"os"
 	"path"
@@ -8,7 +9,6 @@ import (
 
 const ConfigFileStub = "maileryze"
 const ConfigFileName = "maileryze.toml"
-const DatabaseFileName = "userdata.db"
 
 // DataDir returns the directory used for all app data (config, tokens, credentials).
 func DataDir() string {
@@ -24,6 +24,7 @@ func DefaultConfigPath() string {
 	return path.Join(DataDir(), ConfigFileName)
 }
 
-func DbFilePath() string {
-	return path.Join(DataDir(), DatabaseFileName)
+// WALPath returns the path to the write-ahead log file for the given alias.
+func WALPath(alias string) string {
+	return path.Join(DataDir(), fmt.Sprintf("%s_plan.toml", alias))
 }

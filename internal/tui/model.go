@@ -2,8 +2,11 @@ package tui
 
 import (
 	"context"
-	"database/sql"
 	"fmt"
+	"net/url"
+	"os/exec"
+	"runtime"
+	"sort"
 	"strings"
 	"time"
 
@@ -13,196 +16,143 @@ import (
 
 	"maileryze/internal/cfg"
 	"maileryze/internal/connector"
-	"maileryze/internal/db"
 	"maileryze/internal/factory"
+	"maileryze/internal/wal"
 )
 
 type screen int
 
 const (
-	screenOverview screen = iota
-	screenSync
-	screenSenders
-	screenDetail
+	screenTriage screen = iota
+	screenPlan
 )
+
+// ── Sender ────────────────────────────────────────────────────────────────────
+
+type Sender struct {
+	Name             string
+	Address          string
+	Count            int
+	Subject          string // most recent subject (Gmail returns newest first)
+	UnsubscribeURL   string
+	UnsubscribeEmail string
+}
+
+// senderID returns "Display Name <email>" or just "email" if no display name.
+func senderID(s Sender) string {
+	if s.Name != "" && s.Name != s.Address {
+		return s.Name + " <" + s.Address + ">"
+	}
+	return s.Address
+}
 
 // ── message types ─────────────────────────────────────────────────────────────
 
-type overviewLoadedMsg struct {
-	rows []aliasRow
+type connectorReadyMsg struct {
+	conn connector.WritableConnector
 	err  error
 }
 
-type connectorReadyMsg struct {
-	alias string
-	conn  connector.WritableConnector
-	err   error
+type fetchProgressMsg struct {
+	senders []Sender
+	total   int
+	done    bool
+	err     error
 }
 
-type sendersLoadedMsg struct {
-	alias     string
-	senders   []db.Sender
-	decisions map[string]db.SenderDecision
+type commitDoneMsg struct {
+	addresses []string
 	err       error
 }
 
-type detailLoadedMsg struct {
-	emails []db.EmailRecord
-	err    error
+type executionStartedMsg struct {
+	ch chan executeProgressMsg
 }
 
-type syncProgressMsg struct {
-	loaded   int
-	inserted int
-	done     bool
-	err      error
+type executeProgressMsg struct {
+	address string
+	action  wal.Action
+	count   int
+	err     error
+	done    bool
 }
 
-type actionDoneMsg struct {
-	senderAddress string
-	decision      string
-	count         int
-	err           error
+// ── state ─────────────────────────────────────────────────────────────────────
+
+type triageState struct {
+	senders    []Sender
+	staged     map[string]wal.Action
+	cursor     int
+	scroll     int
+	fetching   bool
+	fetchTotal int
+	fetchDone  bool
+	fetchCh    chan fetchProgressMsg
+	sp         spinner.Model
 }
 
-type batchActionDoneMsg struct {
-	decisions  map[string]string
-	counts     map[string]int
-	totalCount int
-	err        error
+type planState struct {
+	executing bool
+	execCh    chan executeProgressMsg
+	done      []string
+	errors    map[string]error
+	sp        spinner.Model
 }
-
-// ── state types ───────────────────────────────────────────────────────────────
-
-type aliasRow struct {
-	alias    string
-	address  string
-	provider string
-	count    int
-	oldest   time.Time
-	newest   time.Time
-	lastSync time.Time
-	decided  int
-	total    int
-}
-
-type overviewState struct {
-	rows    []aliasRow
-	cursor  int
-	loading bool
-}
-
-type syncPreset int
-
-const (
-	preset90Days syncPreset = iota
-	presetYear
-	presetAllTime
-)
-
-var syncPresetLabels = []string{"Last 90 days", "Last year", "All time"}
-
-type syncState struct {
-	alias    string
-	preset   syncPreset
-	running  bool
-	loaded   int
-	inserted int
-	done     bool
-	err      error
-	sp       spinner.Model
-	ch       chan syncProgressMsg
-}
-
-type senderItem struct {
-	sender   db.Sender
-	decision string
-}
-
-type sendersState struct {
-	alias        string
-	allSenders   []db.Sender
-	decisions    map[string]db.SenderDecision
-	items        []senderItem // visible items (respects showDecided)
-	cursor       int
-	scroll       int
-	showDecided  bool
-	loading      bool
-	selected     map[string]bool // persistent x-toggle selections
-	visualMode   bool
-	visualAnchor int
-	pending      map[string]bool // addresses with in-flight async actions
-	sp           spinner.Model   // ticks while pending is non-empty
-}
-
-type detailState struct {
-	alias    string
-	sender   db.Sender
-	emails   []db.EmailRecord
-	cursor   int
-	scroll   int
-	selected map[int]bool
-	loading  bool
-}
-
-type confirmState struct {
-	active    bool
-	title     string
-	body      string
-	action    tea.Cmd
-	addresses []string // sender addresses to mark pending on confirmation
-}
-
-// ── model ─────────────────────────────────────────────────────────────────────
 
 type model struct {
-	database   *sql.DB
 	appConfig  *cfg.AppConfig
-	connectors map[string]connector.WritableConnector
+	conn       connector.WritableConnector
+	alias      string
+	w          *wal.WAL
+	senderInfo map[string]Sender // all seen senders including committed
 
-	width  int
-	height int
+	width, height int
+	screen        screen
 
-	screen screen
-
-	ov      overviewState
-	sy      syncState
-	se      sendersState
-	de      detailState
-	confirm confirmState
+	tr triageState
+	pl planState
 
 	status    string
 	statusErr bool
 }
 
-func New(database *sql.DB, appConfig *cfg.AppConfig) model {
-	syncSp := spinner.New()
-	syncSp.Spinner = spinner.Dot
+func New(alias string, w *wal.WAL, appConfig *cfg.AppConfig) model {
+	fetchSp := spinner.New()
+	fetchSp.Spinner = spinner.Dot
+	fetchSp.Style = lipgloss.NewStyle().Foreground(colorPrimary)
 
-	sendersSp := spinner.New()
-	sendersSp.Spinner = spinner.Dot
-	sendersSp.Style = lipgloss.NewStyle().Foreground(colorPrimary)
+	execSp := spinner.New()
+	execSp.Spinner = spinner.Dot
+	execSp.Style = lipgloss.NewStyle().Foreground(colorPrimary)
 
 	return model{
-		database:   database,
 		appConfig:  appConfig,
-		connectors: make(map[string]connector.WritableConnector),
-		screen:     screenOverview,
-		ov:         overviewState{loading: true},
-		sy:         syncState{sp: syncSp},
-		se:         sendersState{sp: sendersSp, pending: make(map[string]bool), selected: make(map[string]bool)},
+		alias:      alias,
+		w:          w,
+		senderInfo: make(map[string]Sender),
+		screen:     screenTriage,
+		tr: triageState{
+			staged:   make(map[string]wal.Action),
+			fetching: true,
+			sp:       fetchSp,
+		},
+		pl: planState{
+			errors: make(map[string]error),
+			sp:     execSp,
+		},
 	}
 }
 
 func (m model) Init() tea.Cmd {
-	return loadOverviewCmd(m.database, m.appConfig)
+	return tea.Batch(
+		loadConnectorCmd(m.alias),
+		m.tr.sp.Tick,
+	)
 }
 
 // ── Update ────────────────────────────────────────────────────────────────────
 
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
-	var cmds []tea.Cmd
-
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
@@ -213,167 +163,125 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.String() == "ctrl+c" {
 			return m, tea.Quit
 		}
-		if m.confirm.active {
-			return m.updateConfirm(msg)
-		}
 
 	case spinner.TickMsg:
-		if len(m.se.pending) > 0 {
-			m.se.sp, _ = m.se.sp.Update(msg)
-			cmds = append(cmds, m.se.sp.Tick)
+		var cmds []tea.Cmd
+		if m.tr.fetching {
+			m.tr.sp, _ = m.tr.sp.Update(msg)
+			cmds = append(cmds, m.tr.sp.Tick)
 		}
-		if m.sy.running {
-			m.sy.sp, _ = m.sy.sp.Update(msg)
-			cmds = append(cmds, m.sy.sp.Tick)
+		if m.pl.executing {
+			m.pl.sp, _ = m.pl.sp.Update(msg)
+			cmds = append(cmds, m.pl.sp.Tick)
 		}
 		if len(cmds) > 0 {
 			return m, tea.Batch(cmds...)
-		}
-
-	case overviewLoadedMsg:
-		m.ov.loading = false
-		if msg.err != nil {
-			m.setStatus("error loading overview: "+msg.err.Error(), true)
-		} else {
-			m.ov.rows = msg.rows
 		}
 		return m, nil
 
 	case connectorReadyMsg:
 		if msg.err != nil {
-			m.setStatus(fmt.Sprintf("login failed for %s: %s", msg.alias, msg.err), true)
+			m.tr.fetching = false
+			m.setStatus("login failed: "+msg.err.Error(), true)
 			return m, nil
 		}
-		m.connectors[msg.alias] = msg.conn
-		m.setStatus("connected to "+msg.alias, false)
-		// Auto-start sync when the connector arrives while we're on the sync screen
-		if m.screen == screenSync && m.sy.alias == msg.alias && !m.sy.running && !m.sy.done {
-			return m.doStartSync()
-		}
-		return m, nil
+		m.conn = msg.conn
+		ch := make(chan fetchProgressMsg, 1)
+		m.tr.fetchCh = ch
+		startFetchGoroutine(msg.conn, m.w, ch)
+		return m, waitForFetchMsg(ch)
 
-	case sendersLoadedMsg:
-		m.se.loading = false
+	case fetchProgressMsg:
 		if msg.err != nil {
-			m.setStatus("error loading senders: "+msg.err.Error(), true)
-		} else {
-			m.se.allSenders = msg.senders
-			m.se.decisions = msg.decisions
-			m.se.items = buildSenderItems(msg.senders, msg.decisions, m.se.showDecided)
-		}
-		return m, nil
-
-	case detailLoadedMsg:
-		m.de.loading = false
-		if msg.err != nil {
-			m.setStatus("error loading emails: "+msg.err.Error(), true)
-		} else {
-			m.de.emails = msg.emails
-			m.de.cursor = 0
-			m.de.scroll = 0
-			m.de.selected = make(map[int]bool)
-		}
-		return m, nil
-
-	case syncProgressMsg:
-		if msg.err != nil {
-			m.sy.running = false
-			m.sy.done = false
-			m.sy.err = msg.err
-			m.setStatus("sync error: "+msg.err.Error(), true)
+			m.tr.fetching = false
+			m.setStatus("fetch error: "+msg.err.Error(), true)
 			return m, nil
 		}
-		// Intermediate messages always carry valid counts; a done message from
-		// a channel close has zero counts — keep the last tracked values.
-		if !msg.done || msg.loaded > 0 {
-			m.sy.loaded = msg.loaded
-			m.sy.inserted = msg.inserted
+		m.tr.fetchTotal = msg.total
+
+		// Record sender info for execution lookups, filter out decided senders.
+		for _, s := range msg.senders {
+			m.senderInfo[s.Address] = s
 		}
+		undecided := make([]Sender, 0, len(msg.senders))
+		for _, s := range msg.senders {
+			if !m.w.IsDecided(s.Address) {
+				undecided = append(undecided, s)
+			}
+		}
+
+		// Try to keep the cursor on the same sender across updates.
+		var cursorAddr string
+		if len(m.tr.senders) > 0 && m.tr.cursor < len(m.tr.senders) {
+			cursorAddr = m.tr.senders[m.tr.cursor].Address
+		}
+		m.tr.senders = undecided
+		if cursorAddr != "" {
+			for i, s := range m.tr.senders {
+				if s.Address == cursorAddr {
+					m.tr.cursor = i
+					m.tr.scroll = adjustScroll(m.tr.cursor, m.tr.scroll, m.visibleTriageLines())
+					break
+				}
+			}
+		}
+		if m.tr.cursor >= len(m.tr.senders) {
+			m.tr.cursor = max(0, len(m.tr.senders)-1)
+		}
+
 		if msg.done {
-			m.sy.running = false
-			m.sy.done = true
-			m.setStatus(fmt.Sprintf("sync complete — %d loaded, %d new", m.sy.loaded, m.sy.inserted), false)
-		} else if m.sy.ch != nil {
-			return m, waitForSyncMsg(m.sy.ch)
+			m.tr.fetching = false
+			m.tr.fetchDone = true
+		} else {
+			return m, waitForFetchMsg(m.tr.fetchCh)
 		}
 		return m, nil
 
-	case actionDoneMsg:
-		m.confirm.active = false
-		delete(m.se.pending, msg.senderAddress)
+	case commitDoneMsg:
 		if msg.err != nil {
-			m.setStatus("action failed: "+msg.err.Error(), true)
+			m.setStatus("error saving decisions: "+msg.err.Error(), true)
 			return m, nil
 		}
-		_ = db.SaveDecision(m.database, m.se.alias, msg.senderAddress, msg.decision, msg.count)
-		if m.se.decisions == nil {
-			m.se.decisions = make(map[string]db.SenderDecision)
+		decided := make(map[string]bool, len(msg.addresses))
+		for _, addr := range msg.addresses {
+			decided[addr] = true
 		}
-		m.se.decisions[msg.senderAddress] = db.SenderDecision{
-			Alias:          m.se.alias,
-			SenderAddress:  msg.senderAddress,
-			Decision:       msg.decision,
-			EmailsAffected: msg.count,
-		}
-		if m.se.allSenders != nil {
-			m.se.items = buildSenderItems(m.se.allSenders, m.se.decisions, m.se.showDecided)
-			if m.se.cursor >= len(m.se.items) {
-				m.se.cursor = max(0, len(m.se.items)-1)
+		var filtered []Sender
+		for _, s := range m.tr.senders {
+			if !decided[s.Address] {
+				filtered = append(filtered, s)
 			}
 		}
-		m.setStatus(actionStatusMsg(msg), false)
-		// After a delete/unsub action from the detail screen, return to senders
-		if m.screen == screenDetail {
-			switch msg.decision {
-			case "deleted", "unsubscribed", "unsubscribed_deleted":
-				m.screen = screenSenders
-			}
-		}
+		m.tr.senders = filtered
+		m.tr.staged = make(map[string]wal.Action)
+		m.tr.cursor = 0
+		m.tr.scroll = 0
+		m.setStatus(fmt.Sprintf("committed %d decision(s) to plan", len(msg.addresses)), false)
 		return m, nil
 
-	case batchActionDoneMsg:
-		m.confirm.active = false
-		for addr := range msg.decisions {
-			delete(m.se.pending, addr)
-		}
-		if msg.err != nil {
-			m.setStatus("batch action failed: "+msg.err.Error(), true)
+	case executionStartedMsg:
+		m.pl.executing = true
+		m.pl.execCh = msg.ch
+		return m, tea.Batch(waitForExecMsg(msg.ch), m.pl.sp.Tick)
+
+	case executeProgressMsg:
+		if msg.done {
+			m.pl.executing = false
+			m.setStatus(fmt.Sprintf("execution complete — %d actions", len(m.pl.done)), false)
 			return m, nil
 		}
-		if m.se.decisions == nil {
-			m.se.decisions = make(map[string]db.SenderDecision)
+		m.pl.done = append(m.pl.done, msg.address)
+		if msg.err != nil {
+			m.pl.errors[msg.address] = msg.err
 		}
-		for addr, dec := range msg.decisions {
-			count := msg.counts[addr]
-			_ = db.SaveDecision(m.database, m.se.alias, addr, dec, count)
-			m.se.decisions[addr] = db.SenderDecision{
-				Alias:          m.se.alias,
-				SenderAddress:  addr,
-				Decision:       dec,
-				EmailsAffected: count,
-			}
-		}
-		m.se.selected = make(map[string]bool)
-		m.se.visualMode = false
-		if m.se.allSenders != nil {
-			m.se.items = buildSenderItems(m.se.allSenders, m.se.decisions, m.se.showDecided)
-			if m.se.cursor >= len(m.se.items) {
-				m.se.cursor = max(0, len(m.se.items)-1)
-			}
-		}
-		m.setStatus(fmt.Sprintf("batch: %d senders processed (%d emails)", len(msg.decisions), msg.totalCount), false)
-		return m, nil
+		return m, waitForExecMsg(m.pl.execCh)
 	}
 
 	switch m.screen {
-	case screenOverview:
-		return m.updateOverview(msg)
-	case screenSync:
-		return m.updateSync(msg)
-	case screenSenders:
-		return m.updateSenders(msg)
-	case screenDetail:
-		return m.updateDetail(msg)
+	case screenTriage:
+		return m.updateTriage(msg)
+	case screenPlan:
+		return m.updatePlan(msg)
 	}
 	return m, nil
 }
@@ -381,18 +289,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 // ── View ──────────────────────────────────────────────────────────────────────
 
 func (m model) View() string {
-	if m.confirm.active {
-		return m.viewConfirm()
-	}
 	switch m.screen {
-	case screenOverview:
-		return m.viewOverview()
-	case screenSync:
-		return m.viewSync()
-	case screenSenders:
-		return m.viewSenders()
-	case screenDetail:
-		return m.viewDetail()
+	case screenTriage:
+		return m.viewTriage()
+	case screenPlan:
+		return m.viewPlan()
 	}
 	return ""
 }
@@ -404,62 +305,16 @@ func (m *model) setStatus(msg string, isErr bool) {
 	m.statusErr = isErr
 }
 
-func decisionLabel(d string) string {
-	switch d {
-	case "keep":
-		return successStyle.Render("kept")
-	case "deleted":
-		return dangerStyle.Render("deleted")
-	case "unsubscribed":
-		return warningStyle.Render("unsubscribed")
-	case "unsubscribed_deleted":
-		return dangerStyle.Render("unsub+deleted")
-	case "skipped":
-		return mutedStyle.Render("skipped")
-	}
-	return d
-}
-
-func buildSenderItems(senders []db.Sender, decisions map[string]db.SenderDecision, showDecided bool) []senderItem {
-	var items []senderItem
-	for _, s := range senders {
-		dec := ""
-		if d, ok := decisions[s.Address]; ok {
-			dec = d.Decision
-			if !showDecided && dec != "" {
-				continue
-			}
-		}
-		items = append(items, senderItem{sender: s, decision: dec})
-	}
-	return items
-}
-
-func (m model) selectedSenders() []db.Sender {
-	var senders []db.Sender
-	for _, s := range m.se.allSenders {
-		if m.se.selected[s.Address] {
-			senders = append(senders, s)
-		}
-	}
-	return senders
-}
-
-func countPending(senders []db.Sender, decisions map[string]db.SenderDecision) int {
-	n := 0
-	for _, s := range senders {
-		if _, ok := decisions[s.Address]; !ok {
-			n++
-		}
-	}
-	return n
-}
-
 func renderStatusBar(m model) string {
-	// Show a live sync indicator on every screen except the sync screen itself.
-	if m.sy.running && m.screen != screenSync {
-		msg := fmt.Sprintf("%s syncing %s… %s loaded", m.sy.sp.View(), m.sy.alias, fmtInt(m.sy.loaded))
-		return mutedStyle.Render(msg)
+	switch m.screen {
+	case screenTriage:
+		if m.tr.fetching {
+			return mutedStyle.Render(fmt.Sprintf("%s fetching… %s emails scanned", m.tr.sp.View(), fmtInt(m.tr.fetchTotal)))
+		}
+	case screenPlan:
+		if m.pl.executing {
+			return mutedStyle.Render(fmt.Sprintf("%s executing… %d done", m.pl.sp.View(), len(m.pl.done)))
+		}
 	}
 	if m.status == "" {
 		return ""
@@ -470,303 +325,195 @@ func renderStatusBar(m model) string {
 	return statusStyle.Render(m.status)
 }
 
-func renderKeys(pairs ...string) string {
-	var parts []string
-	for i := 0; i+1 < len(pairs); i += 2 {
-		parts = append(parts, keyStyle.Render("["+pairs[i]+"]")+" "+hintStyle.Render(pairs[i+1]))
-	}
-	return strings.Join(parts, "  ")
-}
-
-func actionStatusMsg(msg actionDoneMsg) string {
-	switch msg.decision {
-	case "deleted":
-		return fmt.Sprintf("trashed %d emails from %s", msg.count, msg.senderAddress)
-	case "keep":
-		return fmt.Sprintf("keeping emails from %s", msg.senderAddress)
-	case "skipped":
-		return fmt.Sprintf("skipped %s", msg.senderAddress)
-	case "unsubscribed":
-		return fmt.Sprintf("unsubscribed from %s", msg.senderAddress)
-	case "unsubscribed_deleted":
-		return fmt.Sprintf("unsubscribed and trashed %d emails from %s", msg.count, msg.senderAddress)
-	}
-	return msg.decision
-}
-
 // ── async commands ────────────────────────────────────────────────────────────
-
-func loadOverviewCmd(database *sql.DB, config *cfg.AppConfig) tea.Cmd {
-	return func() tea.Msg {
-		stats, err := db.GetStats(database)
-		if err != nil {
-			return overviewLoadedMsg{err: err}
-		}
-		var rows []aliasRow
-		for _, p := range config.Providers {
-			row := aliasRow{
-				alias:    p.Alias,
-				address:  p.Address,
-				provider: string(p.Provider),
-			}
-			if s, ok := stats.Aliases[p.Alias]; ok {
-				row.count = s.Count
-				row.oldest = s.OldestEmail
-				row.newest = s.NewestEmail
-				row.lastSync = s.LastFetchedAt
-			}
-			if row.count > 0 {
-				senders, _ := db.GetSendersBasic(database, p.Alias)
-				row.total = len(senders)
-				decs, _ := db.GetDecisions(database, p.Alias)
-				row.decided = len(decs)
-			}
-			rows = append(rows, row)
-		}
-		return overviewLoadedMsg{rows: rows}
-	}
-}
 
 func loadConnectorCmd(alias string) tea.Cmd {
 	return func() tea.Msg {
 		conn, _, err := factory.Connect(alias)
-		return connectorReadyMsg{alias: alias, conn: conn, err: err}
+		return connectorReadyMsg{conn: conn, err: err}
 	}
 }
 
-func loadSendersCmd(database *sql.DB, alias string) tea.Cmd {
-	return func() tea.Msg {
-		senders, err := db.GetSendersBasic(database, alias)
-		if err != nil {
-			return sendersLoadedMsg{alias: alias, err: err}
-		}
-		decisions, err := db.GetDecisions(database, alias)
-		return sendersLoadedMsg{alias: alias, senders: senders, decisions: decisions, err: err}
-	}
-}
-
-func loadDetailCmd(database *sql.DB, alias, senderAddress string) tea.Cmd {
-	return func() tea.Msg {
-		emails, err := db.GetEmailsBySender(database, alias, senderAddress)
-		return detailLoadedMsg{emails: emails, err: err}
-	}
-}
-
-func waitForSyncMsg(ch chan syncProgressMsg) tea.Cmd {
-	return func() tea.Msg {
-		msg, ok := <-ch
-		if !ok {
-			// Channel closed by goroutine — sync finished (or was abandoned).
-			return syncProgressMsg{done: true}
-		}
-		return msg
-	}
-}
-
-func startSyncGoroutine(conn connector.WritableConnector, database *sql.DB, alias, providerStr string, preset syncPreset, ch chan syncProgressMsg) {
+func startFetchGoroutine(conn connector.WritableConnector, w *wal.WAL, ch chan fetchProgressMsg) {
 	go func() {
-		// Always close the channel on exit so waitForSyncMsg terminates even
-		// if the polling chain was broken (e.g. user navigated away).
 		defer close(ch)
 
 		ctx := context.Background()
-		start, end := syncDateRange(preset)
+		start := time.Date(2000, 1, 1, 0, 0, 0, 0, time.UTC)
+		end := time.Now().Add(48 * time.Hour)
 		fetchCh := conn.Fetch(ctx, start, end)
 
-		loaded, inserted := 0, 0
+		senders := make(map[string]*Sender)
+		total := 0
+
 		for result := range fetchCh {
 			if result.Err != nil {
-				// Non-blocking: if chain is broken the message is dropped but
-				// defer close(ch) still signals done.
 				select {
-				case ch <- syncProgressMsg{err: result.Err, done: true}:
+				case ch <- fetchProgressMsg{err: result.Err, done: true}:
 				default:
 				}
 				return
 			}
-			isNew, err := db.InsertEmail(database, alias, providerStr, result.Value)
-			if err != nil {
-				select {
-				case ch <- syncProgressMsg{err: err, done: true}:
-				default:
+
+			addr := result.Value.Sender.Address
+			if addr != "" && !w.IsDecided(addr) {
+				if s, ok := senders[addr]; ok {
+					s.Count++
+					if s.UnsubscribeURL == "" {
+						s.UnsubscribeURL = result.Value.Unsubscribe.URL
+					}
+					if s.UnsubscribeEmail == "" {
+						s.UnsubscribeEmail = result.Value.Unsubscribe.Email
+					}
+				} else {
+					senders[addr] = &Sender{
+						Name:             result.Value.Sender.Name,
+						Address:          addr,
+						Count:            1,
+						Subject:          result.Value.Subject,
+						UnsubscribeURL:   result.Value.Unsubscribe.URL,
+						UnsubscribeEmail: result.Value.Unsubscribe.Email,
+					}
 				}
-				return
 			}
-			loaded++
-			if isNew {
-				inserted++
-			}
-			if loaded%50 == 0 {
+			total++
+
+			if total%50 == 0 {
+				snap := snapshotSenders(senders)
 				select {
-				case ch <- syncProgressMsg{loaded: loaded, inserted: inserted}:
+				case ch <- fetchProgressMsg{senders: snap, total: total}:
 				default:
 				}
 			}
 		}
-		// Final progress — non-blocking; channel close handles done signal.
+
+		snap := snapshotSenders(senders)
 		select {
-		case ch <- syncProgressMsg{loaded: loaded, inserted: inserted, done: true}:
+		case ch <- fetchProgressMsg{senders: snap, total: total, done: true}:
 		default:
 		}
 	}()
 }
 
-func syncDateRange(p syncPreset) (start, end time.Time) {
-	end = time.Now()
-	switch p {
-	case preset90Days:
-		start = end.AddDate(0, -3, 0)
-	case presetYear:
-		start = end.AddDate(-1, 0, 0)
-	case presetAllTime:
-		start = time.Date(1990, 1, 1, 0, 0, 0, 0, time.UTC)
+func snapshotSenders(m map[string]*Sender) []Sender {
+	out := make([]Sender, 0, len(m))
+	for _, s := range m {
+		out = append(out, *s)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		return out[i].Count > out[j].Count
+	})
+	return out
+}
+
+func waitForFetchMsg(ch chan fetchProgressMsg) tea.Cmd {
+	return func() tea.Msg {
+		msg, ok := <-ch
+		if !ok {
+			return fetchProgressMsg{done: true}
+		}
+		return msg
+	}
+}
+
+func commitStagedCmd(w *wal.WAL, staged map[string]wal.Action) tea.Cmd {
+	return func() tea.Msg {
+		addresses := make([]string, 0, len(staged))
+		for addr, action := range staged {
+			if err := w.Mark(addr, action); err != nil {
+				return commitDoneMsg{err: err}
+			}
+			addresses = append(addresses, addr)
+		}
+		return commitDoneMsg{addresses: addresses}
+	}
+}
+
+func startExecuteCmd(conn connector.WritableConnector, senderInfo map[string]Sender, unsubAddrs, deleteAddrs []string) tea.Cmd {
+	return func() tea.Msg {
+		ch := make(chan executeProgressMsg, 1)
+		go executeGoroutine(conn, senderInfo, unsubAddrs, deleteAddrs, ch)
+		return executionStartedMsg{ch: ch}
+	}
+}
+
+func executeGoroutine(conn connector.WritableConnector, senderInfo map[string]Sender, unsubAddrs, deleteAddrs []string, ch chan<- executeProgressMsg) {
+	defer close(ch)
+	ctx := context.Background()
+
+	for _, addr := range deleteAddrs {
+		count, err := conn.TrashAllFrom(ctx, addr)
+		if err == nil {
+			if s, ok := senderInfo[addr]; ok {
+				performUnsub(conn, ctx, s) //nolint:errcheck
+			}
+		}
+		ch <- executeProgressMsg{address: addr, action: wal.ActionDelete, count: count, err: err}
+	}
+
+	for _, addr := range unsubAddrs {
+		var err error
+		if s, ok := senderInfo[addr]; ok {
+			err = performUnsub(conn, ctx, s)
+		}
+		ch <- executeProgressMsg{address: addr, action: wal.ActionUnsub, err: err}
+	}
+
+	ch <- executeProgressMsg{done: true}
+}
+
+func performUnsub(conn connector.WritableConnector, ctx context.Context, s Sender) error {
+	switch {
+	case s.UnsubscribeURL != "":
+		openURL(s.UnsubscribeURL)
+		return nil
+	case s.UnsubscribeEmail != "":
+		to, subject := parseMailto(s.UnsubscribeEmail)
+		return conn.SendEmail(ctx, to, subject, "Please unsubscribe me from your mailing list.")
+	}
+	return nil
+}
+
+func waitForExecMsg(ch chan executeProgressMsg) tea.Cmd {
+	return func() tea.Msg {
+		msg, ok := <-ch
+		if !ok {
+			return executeProgressMsg{done: true}
+		}
+		return msg
+	}
+}
+
+// ── utilities used across screens ────────────────────────────────────────────
+
+func parseMailto(s string) (to, subject string) {
+	s = strings.TrimPrefix(s, "mailto:")
+	parts := strings.SplitN(s, "?", 2)
+	to = parts[0]
+	subject = "Unsubscribe"
+	if len(parts) == 2 {
+		vals, err := url.ParseQuery(parts[1])
+		if err == nil {
+			if sub := vals.Get("subject"); sub != "" {
+				subject = sub
+			}
+		}
 	}
 	return
 }
 
-func trashAllCmd(conn connector.WritableConnector, senderAddress string) tea.Cmd {
-	return func() tea.Msg {
-		count, err := conn.TrashAllFrom(context.Background(), senderAddress)
-		return actionDoneMsg{
-			senderAddress: senderAddress,
-			decision:      "deleted",
-			count:         count,
-			err:           err,
-		}
+func openURL(rawURL string) {
+	switch runtime.GOOS {
+	case "darwin":
+		exec.Command("open", rawURL).Start() //nolint:errcheck
+	default:
+		exec.Command("xdg-open", rawURL).Start() //nolint:errcheck
 	}
 }
 
-func trashSelectedCmd(conn connector.WritableConnector, senderAddress string, ids []string) tea.Cmd {
-	return func() tea.Msg {
-		err := conn.TrashMessages(context.Background(), ids)
-		count := 0
-		if err == nil {
-			count = len(ids)
-		}
-		return actionDoneMsg{
-			senderAddress: senderAddress,
-			decision:      "deleted",
-			count:         count,
-			err:           err,
-		}
+func max(a, b int) int {
+	if a > b {
+		return a
 	}
-}
-
-func sendUnsubEmailCmd(conn connector.WritableConnector, senderAddress, to, subject string) tea.Cmd {
-	return func() tea.Msg {
-		if subject == "" {
-			subject = "Unsubscribe"
-		}
-		err := conn.SendEmail(context.Background(), to, subject, "Please unsubscribe me from your mailing list.")
-		decision := "unsubscribed"
-		if err != nil {
-			decision = ""
-		}
-		return actionDoneMsg{
-			senderAddress: senderAddress,
-			decision:      decision,
-			err:           err,
-		}
-	}
-}
-
-func trashAndUnsubCmd(conn connector.WritableConnector, sender db.Sender) tea.Cmd {
-	return func() tea.Msg {
-		count, err := conn.TrashAllFrom(context.Background(), sender.Address)
-		if err != nil {
-			return actionDoneMsg{senderAddress: sender.Address, decision: "deleted", count: count, err: err}
-		}
-		decision := "deleted"
-		switch {
-		case sender.UnsubscribeURL != "":
-			openURL(sender.UnsubscribeURL)
-			decision = "unsubscribed_deleted"
-		case sender.UnsubscribeEmail != "":
-			to, subject := parseMailto(sender.UnsubscribeEmail)
-			conn.SendEmail(context.Background(), to, subject, "Please unsubscribe me from your mailing list.") //nolint:errcheck
-			decision = "unsubscribed_deleted"
-		}
-		return actionDoneMsg{senderAddress: sender.Address, decision: decision, count: count}
-	}
-}
-
-func batchTrashAllCmd(conn connector.WritableConnector, senders []db.Sender) tea.Cmd {
-	return func() tea.Msg {
-		decisions := make(map[string]string, len(senders))
-		counts := make(map[string]int, len(senders))
-		total := 0
-		var firstErr error
-		for _, s := range senders {
-			count, err := conn.TrashAllFrom(context.Background(), s.Address)
-			if err != nil && firstErr == nil {
-				firstErr = err
-			}
-			decisions[s.Address] = "deleted"
-			counts[s.Address] = count
-			total += count
-		}
-		return batchActionDoneMsg{decisions: decisions, counts: counts, totalCount: total, err: firstErr}
-	}
-}
-
-func batchTrashAndUnsubCmd(conn connector.WritableConnector, senders []db.Sender) tea.Cmd {
-	return func() tea.Msg {
-		decisions := make(map[string]string, len(senders))
-		counts := make(map[string]int, len(senders))
-		total := 0
-		var firstErr error
-		for _, s := range senders {
-			count, err := conn.TrashAllFrom(context.Background(), s.Address)
-			if err != nil && firstErr == nil {
-				firstErr = err
-			}
-			counts[s.Address] = count
-			total += count
-			dec := "deleted"
-			switch {
-			case s.UnsubscribeURL != "":
-				openURL(s.UnsubscribeURL)
-				dec = "unsubscribed_deleted"
-			case s.UnsubscribeEmail != "":
-				to, subject := parseMailto(s.UnsubscribeEmail)
-				if e := conn.SendEmail(context.Background(), to, subject, "Please unsubscribe me from your mailing list."); e != nil && firstErr == nil {
-					firstErr = e
-				}
-				dec = "unsubscribed_deleted"
-			}
-			decisions[s.Address] = dec
-		}
-		return batchActionDoneMsg{decisions: decisions, counts: counts, totalCount: total, err: firstErr}
-	}
-}
-
-func batchUnsubCmd(conn connector.WritableConnector, senders []db.Sender) tea.Cmd {
-	return func() tea.Msg {
-		decisions := make(map[string]string, len(senders))
-		counts := make(map[string]int, len(senders))
-		var firstErr error
-		for _, s := range senders {
-			switch {
-			case s.UnsubscribeURL != "":
-				openURL(s.UnsubscribeURL)
-			case s.UnsubscribeEmail != "":
-				to, subject := parseMailto(s.UnsubscribeEmail)
-				if e := conn.SendEmail(context.Background(), to, subject, "Please unsubscribe me from your mailing list."); e != nil && firstErr == nil {
-					firstErr = e
-				}
-			}
-			decisions[s.Address] = "unsubscribed"
-		}
-		return batchActionDoneMsg{decisions: decisions, counts: counts, err: firstErr}
-	}
-}
-
-func batchDecisionCmd(addresses []string, decision string) tea.Cmd {
-	return func() tea.Msg {
-		decisions := make(map[string]string, len(addresses))
-		for _, addr := range addresses {
-			decisions[addr] = decision
-		}
-		return batchActionDoneMsg{decisions: decisions, counts: make(map[string]int)}
-	}
+	return b
 }

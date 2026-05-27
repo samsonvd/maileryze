@@ -1,6 +1,11 @@
 package tui
 
-import "github.com/charmbracelet/lipgloss"
+import (
+	"fmt"
+	"strings"
+
+	"github.com/charmbracelet/lipgloss"
+)
 
 var (
 	colorPrimary = lipgloss.AdaptiveColor{Light: "#5B21B6", Dark: "#A78BFA"}
@@ -9,21 +14,18 @@ var (
 	colorDanger  = lipgloss.AdaptiveColor{Light: "#B91C1C", Dark: "#FCA5A5"}
 	colorWarning = lipgloss.AdaptiveColor{Light: "#B45309", Dark: "#FCD34D"}
 
-	titleStyle  = lipgloss.NewStyle().Bold(true).Foreground(colorPrimary)
-	mutedStyle  = lipgloss.NewStyle().Foreground(colorMuted)
-	boldStyle   = lipgloss.NewStyle().Bold(true)
+	titleStyle   = lipgloss.NewStyle().Bold(true).Foreground(colorPrimary)
+	mutedStyle   = lipgloss.NewStyle().Foreground(colorMuted)
 	successStyle = lipgloss.NewStyle().Foreground(colorSuccess)
 	dangerStyle  = lipgloss.NewStyle().Foreground(colorDanger)
 	warningStyle = lipgloss.NewStyle().Foreground(colorWarning)
 
-	selectedRowStyle  = lipgloss.NewStyle().Bold(true).Foreground(colorPrimary)
-	visualRangeStyle  = lipgloss.NewStyle().Foreground(colorPrimary)
-	decidedRowStyle   = lipgloss.NewStyle().Foreground(colorMuted)
+	selectedRowStyle = lipgloss.NewStyle().Bold(true).Foreground(colorPrimary)
 
-	dialogStyle = lipgloss.NewStyle().
-			Border(lipgloss.RoundedBorder()).
-			BorderForeground(colorPrimary).
-			Padding(1, 3)
+	// Staging action row colours
+	stagedKeepStyle   = lipgloss.NewStyle().Foreground(colorSuccess)
+	stagedUnsubStyle  = lipgloss.NewStyle().Foreground(colorWarning)
+	stagedDeleteStyle = lipgloss.NewStyle().Foreground(colorDanger)
 
 	statusStyle    = lipgloss.NewStyle().Foreground(colorMuted)
 	statusErrStyle = lipgloss.NewStyle().Foreground(colorDanger)
@@ -36,10 +38,7 @@ func divider(width int) string {
 	if width < 1 {
 		return ""
 	}
-	line := ""
-	for i := 0; i < width; i++ {
-		line += "─"
-	}
+	line := strings.Repeat("─", width)
 	return mutedStyle.Render(line)
 }
 
@@ -52,4 +51,37 @@ func truncate(s string, max int) string {
 		return "…"
 	}
 	return string(runes[:max-1]) + "…"
+}
+
+func adjustScroll(cursor, scroll, visH int) int {
+	if cursor < scroll {
+		return cursor
+	}
+	if cursor >= scroll+visH {
+		return cursor - visH + 1
+	}
+	return scroll
+}
+
+func fmtInt(n int) string {
+	if n == 0 {
+		return "0"
+	}
+	s := fmt.Sprintf("%d", n)
+	result := ""
+	for i, ch := range s {
+		if i > 0 && (len(s)-i)%3 == 0 {
+			result += ","
+		}
+		result += string(ch)
+	}
+	return result
+}
+
+func renderKeys(pairs ...string) string {
+	var parts []string
+	for i := 0; i+1 < len(pairs); i += 2 {
+		parts = append(parts, keyStyle.Render("["+pairs[i]+"]")+" "+hintStyle.Render(pairs[i+1]))
+	}
+	return strings.Join(parts, "  ")
 }

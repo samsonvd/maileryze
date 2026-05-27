@@ -9,26 +9,48 @@ import (
 	"github.com/spf13/viper"
 
 	"maileryze/internal/cfg"
-	"maileryze/internal/db"
 	"maileryze/internal/tui"
+	"maileryze/internal/wal"
 )
 
 var cfgFile string
+var aliasFlag string
 
 var rootCmd = &cobra.Command{
 	Use:   "maileryze",
 	Short: "Inbox triage tool",
 	Long:  "maileryze — take back control of your email.",
 	RunE: func(cmd *cobra.Command, args []string) error {
-		database, err := db.Open()
-		if err != nil {
-			return fmt.Errorf("opening database: %w", err)
-		}
-		defer database.Close()
-
 		appConfig := cfg.Load()
+		if len(appConfig.Providers) == 0 {
+			return fmt.Errorf("no providers configured — add entries to %s", cfg.DefaultConfigPath())
+		}
 
-		m := tui.New(database, appConfig)
+		alias := aliasFlag
+		if alias == "" {
+			alias = appConfig.Providers[0].Alias
+			if len(appConfig.Providers) > 1 {
+				fmt.Fprintf(os.Stderr, "Multiple providers configured — using %q. Use --alias to select another.\n", alias)
+			}
+		} else {
+			found := false
+			for _, p := range appConfig.Providers {
+				if p.Alias == alias {
+					found = true
+					break
+				}
+			}
+			if !found {
+				return fmt.Errorf("alias %q not found in config", alias)
+			}
+		}
+
+		w, err := wal.Load(cfg.WALPath(alias))
+		if err != nil {
+			return fmt.Errorf("loading plan: %w", err)
+		}
+
+		m := tui.New(alias, w, appConfig)
 		p := tea.NewProgram(m, tea.WithAltScreen())
 		_, err = p.Run()
 		return err
@@ -45,6 +67,7 @@ func Execute() {
 func init() {
 	cobra.OnInitialize(initConfig)
 	rootCmd.PersistentFlags().StringVar(&cfgFile, "config", "", "config file (default ~/.config/maileryze/maileryze.toml)")
+	rootCmd.Flags().StringVar(&aliasFlag, "alias", "", "email alias to triage (default: first configured provider)")
 }
 
 func initConfig() {
