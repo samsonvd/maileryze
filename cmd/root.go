@@ -1,33 +1,40 @@
-/*
-Copyright © 2026 Samson Ventura-Danziger samson@danziger.uk
-*/
 package cmd
 
 import (
-	"log"
+	"fmt"
 	"os"
 
+	tea "github.com/charmbracelet/bubbletea"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 
-	"maileryze/cmd/analyze"
-	"maileryze/cmd/config"
-	"maileryze/cmd/load"
-	"maileryze/cmd/login"
 	"maileryze/internal/cfg"
+	"maileryze/internal/db"
+	"maileryze/internal/tui"
 )
 
 var cfgFile string
 
 var rootCmd = &cobra.Command{
 	Use:   "maileryze",
-	Short: "Email analyzer and decluttering tool",
-	Long: `Take back control of your email by seeing who is creating the clutter, and then deleting it.
-This tool is open-source and your data never leaves your device.`,
+	Short: "Inbox triage tool",
+	Long:  "maileryze — take back control of your email.",
+	RunE: func(cmd *cobra.Command, args []string) error {
+		database, err := db.Open()
+		if err != nil {
+			return fmt.Errorf("opening database: %w", err)
+		}
+		defer database.Close()
+
+		appConfig := cfg.Load()
+
+		m := tui.New(database, appConfig)
+		p := tea.NewProgram(m, tea.WithAltScreen())
+		_, err = p.Run()
+		return err
+	},
 }
 
-// Execute adds all child commands to the root command and sets flags appropriately.
-// This is called by main.main(). It only needs to happen once to the rootCmd.
 func Execute() {
 	err := rootCmd.Execute()
 	if err != nil {
@@ -37,30 +44,18 @@ func Execute() {
 
 func init() {
 	cobra.OnInitialize(initConfig)
-
-	rootCmd.PersistentFlags().StringVar(&cfgFile, "config", "", "config file (default is $HOME/.config/maileryze/maileryze.toml)")
-	rootCmd.PersistentFlags().StringP("alias", "a", "", "Email provider alias from your config file.")
-
-	rootCmd.AddCommand(analyze.NewCmd())
-	rootCmd.AddCommand(config.NewCmd())
-	rootCmd.AddCommand(load.NewCmd())
-	rootCmd.AddCommand(login.NewCmd())
+	rootCmd.PersistentFlags().StringVar(&cfgFile, "config", "", "config file (default ~/.config/maileryze/maileryze.toml)")
 }
 
 func initConfig() {
 	if cfgFile != "" {
 		viper.SetConfigFile(cfgFile)
-		log.Printf("Reading config from %s", viper.ConfigFileUsed())
 	} else {
 		viper.AddConfigPath(cfg.DataDir())
 		viper.AddConfigPath(".")
 		viper.SetConfigType("toml")
 		viper.SetConfigName(cfg.ConfigFileStub)
 	}
-
 	viper.AutomaticEnv()
-
-	if err := viper.ReadInConfig(); err == nil {
-		log.Printf("Using config file: %s", viper.ConfigFileUsed())
-	}
+	viper.ReadInConfig() //nolint:errcheck
 }

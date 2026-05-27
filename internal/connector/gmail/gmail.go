@@ -1,7 +1,9 @@
 package gmail
 
 import (
+	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"net"
@@ -40,7 +42,10 @@ type GmailConnector struct {
 // New creates a GmailConnector from an OAuth2 credentials JSON file (downloaded
 // from Google Cloud Console). The alias is used to namespace the stored token.
 func New(alias, address string, credentials []byte) (*GmailConnector, error) {
-	conf, err := google.ConfigFromJSON(credentials, googleGmail.GmailReadonlyScope)
+	conf, err := google.ConfigFromJSON(credentials,
+		googleGmail.GmailModifyScope,
+		googleGmail.GmailSendScope,
+	)
 	if err != nil {
 		return nil, fmt.Errorf("parsing credentials: %w", err)
 	}
@@ -52,7 +57,7 @@ func New(alias, address string, credentials []byte) (*GmailConnector, error) {
 }
 
 // Login completes the OAuth2 flow if no valid token is cached, then
-// initialises the Gmail API service. Must be called before Fetch.
+// initialises the Gmail API service. Must be called before other methods.
 func (g *GmailConnector) Login() error {
 	token, err := g.loadToken()
 	if err != nil || !token.Valid() {
@@ -117,6 +122,80 @@ func (g *GmailConnector) Fetch(ctx context.Context, start, end time.Time) <-chan
 	return ch
 }
 
+// TrashAllFrom searches Gmail live for all messages from senderAddress and moves
+// them to Trash using batchModify. Returns the count of messages trashed.
+func (g *GmailConnector) TrashAllFrom(ctx context.Context, senderAddress string) (int, error) {
+	if g.service == nil {
+		return 0, fmt.Errorf("not logged in")
+	}
+
+	var ids []string
+	err := g.service.Users.Messages.List("me").
+		Q(fmt.Sprintf("from:%s", senderAddress)).
+		Pages(ctx, func(page *googleGmail.ListMessagesResponse) error {
+			for _, m := range page.Messages {
+				ids = append(ids, m.Id)
+			}
+			return nil
+		})
+	if err != nil {
+		return 0, fmt.Errorf("listing messages from %s: %w", senderAddress, err)
+	}
+
+	if len(ids) == 0 {
+		return 0, nil
+	}
+
+	if err := g.batchTrash(ctx, ids); err != nil {
+		return 0, err
+	}
+	return len(ids), nil
+}
+
+// TrashMessages moves specific messages (by Gmail message ID) to Trash.
+func (g *GmailConnector) TrashMessages(ctx context.Context, messageIDs []string) error {
+	if g.service == nil {
+		return fmt.Errorf("not logged in")
+	}
+	return g.batchTrash(ctx, messageIDs)
+}
+
+func (g *GmailConnector) batchTrash(ctx context.Context, ids []string) error {
+	const batchSize = 1000
+	for i := 0; i < len(ids); i += batchSize {
+		end := i + batchSize
+		if end > len(ids) {
+			end = len(ids)
+		}
+		req := &googleGmail.BatchModifyMessagesRequest{
+			Ids:            ids[i:end],
+			AddLabelIds:    []string{"TRASH"},
+			RemoveLabelIds: []string{"INBOX"},
+		}
+		if err := g.service.Users.Messages.BatchModify("me", req).Context(ctx).Do(); err != nil {
+			return fmt.Errorf("batch modifying messages: %w", err)
+		}
+	}
+	return nil
+}
+
+// SendEmail sends a plain-text email from the authenticated account.
+// Used to send unsubscribe requests via mailto: mechanisms.
+func (g *GmailConnector) SendEmail(ctx context.Context, to, subject, body string) error {
+	if g.service == nil {
+		return fmt.Errorf("not logged in")
+	}
+
+	var buf bytes.Buffer
+	fmt.Fprintf(&buf, "To: %s\r\nSubject: %s\r\n\r\n%s", to, subject, body)
+
+	msg := &googleGmail.Message{
+		Raw: base64.URLEncoding.EncodeToString(buf.Bytes()),
+	}
+	_, err := g.service.Users.Messages.Send("me", msg).Context(ctx).Do()
+	return err
+}
+
 func parseMessage(msg *googleGmail.Message) connector.EmailContent[any] {
 	headers := make(map[string]string, len(msg.Payload.Headers))
 	for _, h := range msg.Payload.Headers {
@@ -166,10 +245,10 @@ func parseUnsubscribe(header string) connector.UnsubscribeMechanism {
 	return u
 }
 
-// OAuth2 token persistence
+// OAuth2 token persistence — _v2 suffix ensures re-auth after scope change.
 
 func (g *GmailConnector) tokenPath() string {
-	return filepath.Join(cfg.DataDir(), "tokens", g.alias+".json")
+	return filepath.Join(cfg.DataDir(), "tokens", g.alias+"_v2.json")
 }
 
 func (g *GmailConnector) loadToken() (*oauth2.Token, error) {
@@ -224,9 +303,8 @@ func (g *GmailConnector) authorize() (*oauth2.Token, error) {
 	go srv.Serve(listener)                   //nolint:errcheck
 	defer srv.Shutdown(context.Background()) //nolint:errcheck
 
-	fmt.Println("Opening browser for Gmail authorization...")
 	if err := openBrowser(authURL); err != nil {
-		fmt.Printf("Could not open browser automatically. Visit this URL:\n\n  %s\n\n", authURL)
+		return nil, fmt.Errorf("could not open browser — visit this URL to authorize:\n%s", authURL)
 	}
 
 	select {
