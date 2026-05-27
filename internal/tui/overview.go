@@ -4,9 +4,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/charmbracelet/bubbles/list"
 	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
 )
 
 func (m model) updateOverview(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -37,21 +35,10 @@ func (m model) updateOverview(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m model) enterSenders(alias string) (model, tea.Cmd) {
-	delegate := list.NewDefaultDelegate()
-	delegate.Styles.SelectedTitle = lipgloss.NewStyle().Bold(true).Foreground(colorPrimary)
-	delegate.Styles.SelectedDesc = lipgloss.NewStyle().Foreground(colorMuted)
-	delegate.Styles.NormalTitle = lipgloss.NewStyle()
-	delegate.Styles.NormalDesc = lipgloss.NewStyle().Foreground(colorMuted)
-
-	l := list.New(nil, delegate, m.width, senderListHeight(m.height))
-	l.Title = "Loading senders..."
-	l.SetShowHelp(false)
-	l.SetFilteringEnabled(true)
-
 	m.se = sendersState{
-		alias:   alias,
-		list:    l,
-		loading: true,
+		alias:    alias,
+		loading:  true,
+		selected: make(map[string]bool),
 	}
 	m.screen = screenSenders
 

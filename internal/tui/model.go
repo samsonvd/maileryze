@@ -7,7 +7,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/charmbracelet/bubbles/list"
 	"github.com/charmbracelet/bubbles/spinner"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
@@ -118,55 +117,20 @@ type syncState struct {
 type senderItem struct {
 	sender   db.Sender
 	decision string
-	selected bool
-}
-
-func (s senderItem) Title() string {
-	icon := "   "
-	switch {
-	case s.sender.UnsubscribeURL != "":
-		icon = "URL"
-	case s.sender.UnsubscribeEmail != "":
-		icon = "EML"
-	}
-	name := s.sender.Address
-	if s.sender.Name != "" && s.sender.Name != s.sender.Address {
-		name = s.sender.Name
-	}
-	sel := "  "
-	if s.selected {
-		sel = "✓ "
-	}
-	label := sel + fmt.Sprintf("[%s] %s", icon, name)
-	if s.decision != "" {
-		return decidedRowStyle.Render(label)
-	}
-	return label
-}
-
-func (s senderItem) Description() string {
-	count := fmt.Sprintf("%d emails", s.sender.Count)
-	if s.decision != "" {
-		return decidedRowStyle.Render(count + "  ·  " + decisionLabel(s.decision))
-	}
-	if s.sender.Name != "" && s.sender.Name != s.sender.Address {
-		return mutedStyle.Render(s.sender.Address + "  ·  " + count)
-	}
-	return mutedStyle.Render(count)
-}
-
-func (s senderItem) FilterValue() string {
-	return s.sender.Address + " " + s.sender.Name
 }
 
 type sendersState struct {
-	alias       string
-	allSenders  []db.Sender
-	decisions   map[string]db.SenderDecision
-	list        list.Model
-	showDecided bool
-	loading     bool
-	selected    map[string]bool
+	alias        string
+	allSenders   []db.Sender
+	decisions    map[string]db.SenderDecision
+	items        []senderItem // visible items (respects showDecided)
+	cursor       int
+	scroll       int
+	showDecided  bool
+	loading      bool
+	selected     map[string]bool // persistent x-toggle selections
+	visualMode   bool
+	visualAnchor int
 }
 
 type detailState struct {
@@ -242,9 +206,6 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
-		if m.screen == screenSenders && !m.se.loading {
-			m.se.list.SetSize(msg.Width, senderListHeight(msg.Height))
-		}
 		return m, nil
 
 	case tea.KeyMsg:
@@ -297,13 +258,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		} else {
 			m.se.allSenders = msg.senders
 			m.se.decisions = msg.decisions
-			items := buildSenderItems(msg.senders, msg.decisions, m.se.selected, m.se.showDecided)
-			cmd := m.se.list.SetItems(items)
-			cmds = append(cmds, cmd)
-			pending := countPending(msg.senders, msg.decisions)
-			m.se.list.Title = fmt.Sprintf("%s — %d pending", msg.alias, pending)
+			m.se.items = buildSenderItems(msg.senders, msg.decisions, m.se.showDecided)
 		}
-		return m, tea.Batch(cmds...)
+		return m, nil
 
 	case detailLoadedMsg:
 		m.de.loading = false
@@ -358,11 +315,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			EmailsAffected: msg.count,
 		}
 		if m.se.allSenders != nil {
-			items := buildSenderItems(m.se.allSenders, m.se.decisions, m.se.selected, m.se.showDecided)
-			cmd := m.se.list.SetItems(items)
-			cmds = append(cmds, cmd)
-			pending := countPending(m.se.allSenders, m.se.decisions)
-			m.se.list.Title = fmt.Sprintf("%s — %d pending", m.se.alias, pending)
+			m.se.items = buildSenderItems(m.se.allSenders, m.se.decisions, m.se.showDecided)
+			if m.se.cursor >= len(m.se.items) {
+				m.se.cursor = max(0, len(m.se.items)-1)
+			}
 		}
 		m.setStatus(actionStatusMsg(msg), false)
 		// After a delete/unsub action from the detail screen, return to senders
@@ -372,7 +328,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.screen = screenSenders
 			}
 		}
-		return m, tea.Batch(cmds...)
+		return m, nil
 
 	case batchActionDoneMsg:
 		m.confirm.working = false
@@ -395,15 +351,15 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 		m.se.selected = make(map[string]bool)
+		m.se.visualMode = false
 		if m.se.allSenders != nil {
-			items := buildSenderItems(m.se.allSenders, m.se.decisions, m.se.selected, m.se.showDecided)
-			cmd := m.se.list.SetItems(items)
-			cmds = append(cmds, cmd)
-			pending := countPending(m.se.allSenders, m.se.decisions)
-			m.se.list.Title = fmt.Sprintf("%s — %d pending", m.se.alias, pending)
+			m.se.items = buildSenderItems(m.se.allSenders, m.se.decisions, m.se.showDecided)
+			if m.se.cursor >= len(m.se.items) {
+				m.se.cursor = max(0, len(m.se.items)-1)
+			}
 		}
 		m.setStatus(fmt.Sprintf("batch: %d senders processed (%d emails)", len(msg.decisions), msg.totalCount), false)
-		return m, tea.Batch(cmds...)
+		return m, nil
 	}
 
 	switch m.screen {
@@ -445,14 +401,6 @@ func (m *model) setStatus(msg string, isErr bool) {
 	m.statusErr = isErr
 }
 
-func senderListHeight(total int) int {
-	h := total - 2
-	if h < 1 {
-		return 1
-	}
-	return h
-}
-
 func decisionLabel(d string) string {
 	switch d {
 	case "keep":
@@ -469,8 +417,8 @@ func decisionLabel(d string) string {
 	return d
 }
 
-func buildSenderItems(senders []db.Sender, decisions map[string]db.SenderDecision, selected map[string]bool, showDecided bool) []list.Item {
-	var items []list.Item
+func buildSenderItems(senders []db.Sender, decisions map[string]db.SenderDecision, showDecided bool) []senderItem {
+	var items []senderItem
 	for _, s := range senders {
 		dec := ""
 		if d, ok := decisions[s.Address]; ok {
@@ -479,7 +427,7 @@ func buildSenderItems(senders []db.Sender, decisions map[string]db.SenderDecisio
 				continue
 			}
 		}
-		items = append(items, senderItem{sender: s, decision: dec, selected: selected[s.Address]})
+		items = append(items, senderItem{sender: s, decision: dec})
 	}
 	return items
 }

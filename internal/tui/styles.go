@@ -16,8 +16,9 @@ var (
 	dangerStyle  = lipgloss.NewStyle().Foreground(colorDanger)
 	warningStyle = lipgloss.NewStyle().Foreground(colorWarning)
 
-	selectedRowStyle = lipgloss.NewStyle().Bold(true).Foreground(colorPrimary)
-	decidedRowStyle  = lipgloss.NewStyle().Foreground(colorMuted)
+	selectedRowStyle  = lipgloss.NewStyle().Bold(true).Foreground(colorPrimary)
+	visualRangeStyle  = lipgloss.NewStyle().Foreground(colorPrimary)
+	decidedRowStyle   = lipgloss.NewStyle().Foreground(colorMuted)
 
 	dialogStyle = lipgloss.NewStyle().
 			Border(lipgloss.RoundedBorder()).
