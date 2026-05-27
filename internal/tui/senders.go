@@ -54,6 +54,7 @@ func (m model) selectedSender() (senderItem, bool) {
 
 // batchTargets returns the senders the next action should apply to:
 // visual range if in visual mode, persistent x-selections otherwise.
+// Senders with an in-flight action (pending) are always excluded.
 func (m model) batchTargets() []senderItem {
 	if m.se.visualMode {
 		lo, hi := m.se.visualAnchor, m.se.cursor
@@ -62,13 +63,16 @@ func (m model) batchTargets() []senderItem {
 		}
 		var out []senderItem
 		for i := lo; i <= hi && i < len(m.se.items); i++ {
-			out = append(out, m.se.items[i])
+			item := m.se.items[i]
+			if !m.se.pending[item.sender.Address] {
+				out = append(out, item)
+			}
 		}
 		return out
 	}
 	var out []senderItem
 	for _, item := range m.se.items {
-		if m.se.selected[item.sender.Address] {
+		if m.se.selected[item.sender.Address] && !m.se.pending[item.sender.Address] {
 			out = append(out, item)
 		}
 	}
@@ -288,6 +292,10 @@ func (m model) keepSender() (model, tea.Cmd) {
 	if !ok {
 		return m, nil
 	}
+	if m.se.pending[s.sender.Address] {
+		m.setStatus("action already in progress for this sender", false)
+		return m, nil
+	}
 	addr := s.sender.Address
 	return m, func() tea.Msg {
 		return actionDoneMsg{senderAddress: addr, decision: "keep"}
@@ -297,6 +305,10 @@ func (m model) keepSender() (model, tea.Cmd) {
 func (m model) skipSender() (model, tea.Cmd) {
 	s, ok := m.selectedSender()
 	if !ok {
+		return m, nil
+	}
+	if m.se.pending[s.sender.Address] {
+		m.setStatus("action already in progress for this sender", false)
 		return m, nil
 	}
 	addr := s.sender.Address

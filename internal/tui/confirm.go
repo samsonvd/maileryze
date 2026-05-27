@@ -25,6 +25,11 @@ func (m model) updateConfirm(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.se.pending[addr] = true
 			}
 			m.confirm.active = false
+			// Clear selection state — the action has consumed it.
+			// This prevents the visual range from being re-used for a
+			// subsequent keep/skip that would conflict with in-flight deletes.
+			m.se.visualMode = false
+			m.se.selected = make(map[string]bool)
 			// Kick the senders spinner if there's anything to wait for.
 			var spinCmd tea.Cmd
 			if len(m.se.pending) > 0 {
