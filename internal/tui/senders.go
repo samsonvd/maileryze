@@ -28,7 +28,7 @@ func (m model) updateSenders(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		case "h":
 			m.se.showDecided = !m.se.showDecided
-			items := buildSenderItems(m.se.allSenders, m.se.decisions, m.se.showDecided)
+			items := buildSenderItems(m.se.allSenders, m.se.decisions, m.se.selected, m.se.showDecided)
 			cmd := m.se.list.SetItems(items)
 			pending := countPending(m.se.allSenders, m.se.decisions)
 			label := fmt.Sprintf("%s — %d pending", m.se.alias, pending)
@@ -42,16 +42,58 @@ func (m model) updateSenders(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m.openSenderDetail()
 
 		case "d":
+			if len(m.se.selected) > 0 {
+				return m.confirmBatchDelete()
+			}
 			return m.confirmDeleteSender()
 
+		case "D":
+			if len(m.se.selected) > 0 {
+				return m.confirmBatchTrashAndUnsub()
+			}
+			return m.confirmTrashAndUnsubSender()
+
 		case "u":
+			if len(m.se.selected) > 0 {
+				return m.confirmBatchUnsub()
+			}
 			return m.handleUnsubscribe()
 
 		case "k":
+			if len(m.se.selected) > 0 {
+				return m.batchKeep()
+			}
 			return m.keepSender()
 
 		case "s":
+			if len(m.se.selected) > 0 {
+				return m.batchSkip()
+			}
 			return m.skipSender()
+
+		case "x":
+			s, ok := m.selectedSender()
+			if !ok {
+				return m, nil
+			}
+			if m.se.selected == nil {
+				m.se.selected = make(map[string]bool)
+			}
+			addr := s.sender.Address
+			if m.se.selected[addr] {
+				delete(m.se.selected, addr)
+			} else {
+				m.se.selected[addr] = true
+			}
+			items := buildSenderItems(m.se.allSenders, m.se.decisions, m.se.selected, m.se.showDecided)
+			cmd := m.se.list.SetItems(items)
+			return m, cmd
+
+		case "X":
+			m.se.selected = make(map[string]bool)
+			items := buildSenderItems(m.se.allSenders, m.se.decisions, m.se.selected, m.se.showDecided)
+			cmd := m.se.list.SetItems(items)
+			return m, cmd
 		}
 
 	}
@@ -196,6 +238,100 @@ func (m model) skipSender() (model, tea.Cmd) {
 	}
 }
 
+func (m model) confirmTrashAndUnsubSender() (model, tea.Cmd) {
+	s, ok := m.selectedSender()
+	if !ok {
+		return m, nil
+	}
+	conn, hasConn := m.connectors[m.se.alias]
+	if !hasConn {
+		m.setStatus("Still connecting to Gmail…", false)
+		return m, nil
+	}
+	addr := s.sender.Address
+	body := "Searches Gmail live — all historical emails trashed and unsubscribe request sent."
+	if s.sender.UnsubscribeURL == "" && s.sender.UnsubscribeEmail == "" {
+		body = "No unsubscribe mechanism found — will only trash all emails."
+	}
+	m.confirm = confirmState{
+		active: true,
+		title:  fmt.Sprintf("Trash all + unsubscribe from %s?", addr),
+		body:   body,
+		sp:     m.confirm.sp,
+		action: trashAndUnsubCmd(conn, s.sender),
+	}
+	return m, nil
+}
+
+func (m model) confirmBatchDelete() (model, tea.Cmd) {
+	senders := m.selectedSenders()
+	conn, hasConn := m.connectors[m.se.alias]
+	if !hasConn {
+		m.setStatus("Still connecting to Gmail…", false)
+		return m, nil
+	}
+	m.confirm = confirmState{
+		active: true,
+		title:  fmt.Sprintf("Trash all emails from %d senders?", len(senders)),
+		body:   "Searches Gmail live — all historical emails from these senders will be moved to Trash.",
+		sp:     m.confirm.sp,
+		action: batchTrashAllCmd(conn, senders),
+	}
+	return m, nil
+}
+
+func (m model) confirmBatchTrashAndUnsub() (model, tea.Cmd) {
+	senders := m.selectedSenders()
+	conn, hasConn := m.connectors[m.se.alias]
+	if !hasConn {
+		m.setStatus("Still connecting to Gmail…", false)
+		return m, nil
+	}
+	m.confirm = confirmState{
+		active: true,
+		title:  fmt.Sprintf("Trash all + unsubscribe from %d senders?", len(senders)),
+		body:   "Searches Gmail live — all historical emails trashed. Unsubscribe skipped where unavailable.",
+		sp:     m.confirm.sp,
+		action: batchTrashAndUnsubCmd(conn, senders),
+	}
+	return m, nil
+}
+
+func (m model) confirmBatchUnsub() (model, tea.Cmd) {
+	senders := m.selectedSenders()
+	conn, hasConn := m.connectors[m.se.alias]
+	if !hasConn {
+		m.setStatus("Still connecting to Gmail…", false)
+		return m, nil
+	}
+	m.confirm = confirmState{
+		active: true,
+		title:  fmt.Sprintf("Unsubscribe from %d senders?", len(senders)),
+		body:   "Opens unsubscribe URLs and sends unsubscribe emails where available.",
+		sp:     m.confirm.sp,
+		action: batchUnsubCmd(conn, senders),
+	}
+	return m, nil
+}
+
+func (m model) batchKeep() (model, tea.Cmd) {
+	senders := m.selectedSenders()
+	addrs := make([]string, len(senders))
+	for i, s := range senders {
+		addrs[i] = s.Address
+	}
+	return m, batchDecisionCmd(addrs, "keep")
+}
+
+func (m model) batchSkip() (model, tea.Cmd) {
+	senders := m.selectedSenders()
+	addrs := make([]string, len(senders))
+	for i, s := range senders {
+		addrs[i] = s.Address
+	}
+	return m, batchDecisionCmd(addrs, "skipped")
+}
+
 func (m model) viewSenders() string {
 	var b strings.Builder
 
@@ -209,11 +345,17 @@ func (m model) viewSenders() string {
 	b.WriteString(m.se.list.View() + "\n")
 	b.WriteString(divider(m.width) + "\n")
 
+	if n := len(m.se.selected); n > 0 {
+		b.WriteString(mutedStyle.Render(fmt.Sprintf("  %d selected — actions apply to all selected", n)) + "\n")
+	}
 	hint := renderKeys(
 		"d", "delete all",
+		"D", "trash+unsub",
 		"u", "unsubscribe",
 		"k", "keep",
 		"s", "skip",
+		"x", "select",
+		"X", "clear sel",
 		"↵", "detail",
 		"h", "show decided",
 		"esc", "back",

@@ -66,6 +66,13 @@ type actionDoneMsg struct {
 	err           error
 }
 
+type batchActionDoneMsg struct {
+	decisions  map[string]string
+	counts     map[string]int
+	totalCount int
+	err        error
+}
+
 // ── state types ───────────────────────────────────────────────────────────────
 
 type aliasRow struct {
@@ -111,6 +118,7 @@ type syncState struct {
 type senderItem struct {
 	sender   db.Sender
 	decision string
+	selected bool
 }
 
 func (s senderItem) Title() string {
@@ -125,7 +133,11 @@ func (s senderItem) Title() string {
 	if s.sender.Name != "" && s.sender.Name != s.sender.Address {
 		name = s.sender.Name
 	}
-	label := fmt.Sprintf("[%s] %s", icon, name)
+	sel := "  "
+	if s.selected {
+		sel = "✓ "
+	}
+	label := sel + fmt.Sprintf("[%s] %s", icon, name)
 	if s.decision != "" {
 		return decidedRowStyle.Render(label)
 	}
@@ -154,6 +166,7 @@ type sendersState struct {
 	list        list.Model
 	showDecided bool
 	loading     bool
+	selected    map[string]bool
 }
 
 type detailState struct {
@@ -284,7 +297,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		} else {
 			m.se.allSenders = msg.senders
 			m.se.decisions = msg.decisions
-			items := buildSenderItems(msg.senders, msg.decisions, m.se.showDecided)
+			items := buildSenderItems(msg.senders, msg.decisions, m.se.selected, m.se.showDecided)
 			cmd := m.se.list.SetItems(items)
 			cmds = append(cmds, cmd)
 			pending := countPending(msg.senders, msg.decisions)
@@ -341,7 +354,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			EmailsAffected: msg.count,
 		}
 		if m.se.allSenders != nil {
-			items := buildSenderItems(m.se.allSenders, m.se.decisions, m.se.showDecided)
+			items := buildSenderItems(m.se.allSenders, m.se.decisions, m.se.selected, m.se.showDecided)
 			cmd := m.se.list.SetItems(items)
 			cmds = append(cmds, cmd)
 			pending := countPending(m.se.allSenders, m.se.decisions)
@@ -355,6 +368,37 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.screen = screenSenders
 			}
 		}
+		return m, tea.Batch(cmds...)
+
+	case batchActionDoneMsg:
+		m.confirm.working = false
+		m.confirm.active = false
+		if msg.err != nil {
+			m.setStatus("batch action failed: "+msg.err.Error(), true)
+			return m, nil
+		}
+		if m.se.decisions == nil {
+			m.se.decisions = make(map[string]db.SenderDecision)
+		}
+		for addr, dec := range msg.decisions {
+			count := msg.counts[addr]
+			_ = db.SaveDecision(m.database, m.se.alias, addr, dec, count)
+			m.se.decisions[addr] = db.SenderDecision{
+				Alias:          m.se.alias,
+				SenderAddress:  addr,
+				Decision:       dec,
+				EmailsAffected: count,
+			}
+		}
+		m.se.selected = make(map[string]bool)
+		if m.se.allSenders != nil {
+			items := buildSenderItems(m.se.allSenders, m.se.decisions, m.se.selected, m.se.showDecided)
+			cmd := m.se.list.SetItems(items)
+			cmds = append(cmds, cmd)
+			pending := countPending(m.se.allSenders, m.se.decisions)
+			m.se.list.Title = fmt.Sprintf("%s — %d pending", m.se.alias, pending)
+		}
+		m.setStatus(fmt.Sprintf("batch: %d senders processed (%d emails)", len(msg.decisions), msg.totalCount), false)
 		return m, tea.Batch(cmds...)
 	}
 
@@ -421,7 +465,7 @@ func decisionLabel(d string) string {
 	return d
 }
 
-func buildSenderItems(senders []db.Sender, decisions map[string]db.SenderDecision, showDecided bool) []list.Item {
+func buildSenderItems(senders []db.Sender, decisions map[string]db.SenderDecision, selected map[string]bool, showDecided bool) []list.Item {
 	var items []list.Item
 	for _, s := range senders {
 		dec := ""
@@ -431,9 +475,19 @@ func buildSenderItems(senders []db.Sender, decisions map[string]db.SenderDecisio
 				continue
 			}
 		}
-		items = append(items, senderItem{sender: s, decision: dec})
+		items = append(items, senderItem{sender: s, decision: dec, selected: selected[s.Address]})
 	}
 	return items
+}
+
+func (m model) selectedSenders() []db.Sender {
+	var senders []db.Sender
+	for _, s := range m.se.allSenders {
+		if m.se.selected[s.Address] {
+			senders = append(senders, s)
+		}
+	}
+	return senders
 }
 
 func countPending(senders []db.Sender, decisions map[string]db.SenderDecision) int {
@@ -629,5 +683,106 @@ func sendUnsubEmailCmd(conn connector.WritableConnector, senderAddress, to, subj
 			decision:      decision,
 			err:           err,
 		}
+	}
+}
+
+func trashAndUnsubCmd(conn connector.WritableConnector, sender db.Sender) tea.Cmd {
+	return func() tea.Msg {
+		count, err := conn.TrashAllFrom(context.Background(), sender.Address)
+		if err != nil {
+			return actionDoneMsg{senderAddress: sender.Address, decision: "deleted", count: count, err: err}
+		}
+		decision := "deleted"
+		switch {
+		case sender.UnsubscribeURL != "":
+			openURL(sender.UnsubscribeURL)
+			decision = "unsubscribed_deleted"
+		case sender.UnsubscribeEmail != "":
+			to, subject := parseMailto(sender.UnsubscribeEmail)
+			conn.SendEmail(context.Background(), to, subject, "Please unsubscribe me from your mailing list.") //nolint:errcheck
+			decision = "unsubscribed_deleted"
+		}
+		return actionDoneMsg{senderAddress: sender.Address, decision: decision, count: count}
+	}
+}
+
+func batchTrashAllCmd(conn connector.WritableConnector, senders []db.Sender) tea.Cmd {
+	return func() tea.Msg {
+		decisions := make(map[string]string, len(senders))
+		counts := make(map[string]int, len(senders))
+		total := 0
+		var firstErr error
+		for _, s := range senders {
+			count, err := conn.TrashAllFrom(context.Background(), s.Address)
+			if err != nil && firstErr == nil {
+				firstErr = err
+			}
+			decisions[s.Address] = "deleted"
+			counts[s.Address] = count
+			total += count
+		}
+		return batchActionDoneMsg{decisions: decisions, counts: counts, totalCount: total, err: firstErr}
+	}
+}
+
+func batchTrashAndUnsubCmd(conn connector.WritableConnector, senders []db.Sender) tea.Cmd {
+	return func() tea.Msg {
+		decisions := make(map[string]string, len(senders))
+		counts := make(map[string]int, len(senders))
+		total := 0
+		var firstErr error
+		for _, s := range senders {
+			count, err := conn.TrashAllFrom(context.Background(), s.Address)
+			if err != nil && firstErr == nil {
+				firstErr = err
+			}
+			counts[s.Address] = count
+			total += count
+			dec := "deleted"
+			switch {
+			case s.UnsubscribeURL != "":
+				openURL(s.UnsubscribeURL)
+				dec = "unsubscribed_deleted"
+			case s.UnsubscribeEmail != "":
+				to, subject := parseMailto(s.UnsubscribeEmail)
+				if e := conn.SendEmail(context.Background(), to, subject, "Please unsubscribe me from your mailing list."); e != nil && firstErr == nil {
+					firstErr = e
+				}
+				dec = "unsubscribed_deleted"
+			}
+			decisions[s.Address] = dec
+		}
+		return batchActionDoneMsg{decisions: decisions, counts: counts, totalCount: total, err: firstErr}
+	}
+}
+
+func batchUnsubCmd(conn connector.WritableConnector, senders []db.Sender) tea.Cmd {
+	return func() tea.Msg {
+		decisions := make(map[string]string, len(senders))
+		counts := make(map[string]int, len(senders))
+		var firstErr error
+		for _, s := range senders {
+			switch {
+			case s.UnsubscribeURL != "":
+				openURL(s.UnsubscribeURL)
+			case s.UnsubscribeEmail != "":
+				to, subject := parseMailto(s.UnsubscribeEmail)
+				if e := conn.SendEmail(context.Background(), to, subject, "Please unsubscribe me from your mailing list."); e != nil && firstErr == nil {
+					firstErr = e
+				}
+			}
+			decisions[s.Address] = "unsubscribed"
+		}
+		return batchActionDoneMsg{decisions: decisions, counts: counts, err: firstErr}
+	}
+}
+
+func batchDecisionCmd(addresses []string, decision string) tea.Cmd {
+	return func() tea.Msg {
+		decisions := make(map[string]string, len(addresses))
+		for _, addr := range addresses {
+			decisions[addr] = decision
+		}
+		return batchActionDoneMsg{decisions: decisions, counts: make(map[string]int)}
 	}
 }
