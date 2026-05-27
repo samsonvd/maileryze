@@ -35,10 +35,13 @@ func (m model) updateOverview(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m model) enterSenders(alias string) (model, tea.Cmd) {
+	sp := m.se.sp // preserve the spinner model across re-entries
 	m.se = sendersState{
 		alias:    alias,
 		loading:  true,
 		selected: make(map[string]bool),
+		pending:  make(map[string]bool),
+		sp:       sp,
 	}
 	m.screen = screenSenders
 

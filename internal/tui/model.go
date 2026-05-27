@@ -131,6 +131,8 @@ type sendersState struct {
 	selected     map[string]bool // persistent x-toggle selections
 	visualMode   bool
 	visualAnchor int
+	pending      map[string]bool // addresses with in-flight async actions
+	sp           spinner.Model   // ticks while pending is non-empty
 }
 
 type detailState struct {
@@ -144,12 +146,11 @@ type detailState struct {
 }
 
 type confirmState struct {
-	active  bool
-	title   string
-	body    string
-	working bool
-	sp      spinner.Model
-	action  tea.Cmd
+	active    bool
+	title     string
+	body      string
+	action    tea.Cmd
+	addresses []string // sender addresses to mark pending on confirmation
 }
 
 // ── model ─────────────────────────────────────────────────────────────────────
@@ -178,9 +179,9 @@ func New(database *sql.DB, appConfig *cfg.AppConfig) model {
 	syncSp := spinner.New()
 	syncSp.Spinner = spinner.Dot
 
-	confirmSp := spinner.New()
-	confirmSp.Spinner = spinner.Dot
-	confirmSp.Style = lipgloss.NewStyle().Foreground(colorPrimary)
+	sendersSp := spinner.New()
+	sendersSp.Spinner = spinner.Dot
+	sendersSp.Style = lipgloss.NewStyle().Foreground(colorPrimary)
 
 	return model{
 		database:   database,
@@ -189,7 +190,7 @@ func New(database *sql.DB, appConfig *cfg.AppConfig) model {
 		screen:     screenOverview,
 		ov:         overviewState{loading: true},
 		sy:         syncState{sp: syncSp},
-		confirm:    confirmState{sp: confirmSp},
+		se:         sendersState{sp: sendersSp, pending: make(map[string]bool), selected: make(map[string]bool)},
 	}
 }
 
@@ -217,9 +218,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 	case spinner.TickMsg:
-		if m.confirm.working {
-			m.confirm.sp, _ = m.confirm.sp.Update(msg)
-			cmds = append(cmds, m.confirm.sp.Tick)
+		if len(m.se.pending) > 0 {
+			m.se.sp, _ = m.se.sp.Update(msg)
+			cmds = append(cmds, m.se.sp.Tick)
 		}
 		if m.sy.running {
 			m.sy.sp, _ = m.sy.sp.Update(msg)
@@ -298,8 +299,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case actionDoneMsg:
-		m.confirm.working = false
 		m.confirm.active = false
+		delete(m.se.pending, msg.senderAddress)
 		if msg.err != nil {
 			m.setStatus("action failed: "+msg.err.Error(), true)
 			return m, nil
@@ -331,8 +332,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case batchActionDoneMsg:
-		m.confirm.working = false
 		m.confirm.active = false
+		for addr := range msg.decisions {
+			delete(m.se.pending, addr)
+		}
 		if msg.err != nil {
 			m.setStatus("batch action failed: "+msg.err.Error(), true)
 			return m, nil

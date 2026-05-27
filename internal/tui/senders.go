@@ -226,8 +226,8 @@ func (m model) confirmDeleteSender() (model, tea.Cmd) {
 		title:  fmt.Sprintf("Trash all emails from %s?", addr),
 		body: "This searches Gmail live — all historical emails from this sender\n" +
 			"will be moved to Trash, not just what's in your local database.",
-		sp:     m.confirm.sp,
-		action: trashAllCmd(conn, addr),
+		action:    trashAllCmd(conn, addr),
+		addresses: []string{addr},
 	}
 	return m, nil
 }
@@ -252,10 +252,10 @@ func (m model) unsubscribeViaURL(s senderItem) (model, tea.Cmd) {
 	rawURL := s.sender.UnsubscribeURL
 	addr := s.sender.Address
 	m.confirm = confirmState{
-		active: true,
-		title:  fmt.Sprintf("Open unsubscribe link for %s?", addr),
-		body:   mutedStyle.Render(truncate(rawURL, 70)),
-		sp:     m.confirm.sp,
+		active:    true,
+		title:     fmt.Sprintf("Open unsubscribe link for %s?", addr),
+		body:      mutedStyle.Render(truncate(rawURL, 70)),
+		addresses: []string{addr},
 		action: func() tea.Msg {
 			openURL(rawURL)
 			return actionDoneMsg{senderAddress: addr, decision: "unsubscribed"}
@@ -277,8 +277,8 @@ func (m model) unsubscribeViaEmail(s senderItem) (model, tea.Cmd) {
 		title:  fmt.Sprintf("Send unsubscribe email to %s?", to),
 		body: mutedStyle.Render(fmt.Sprintf("From: %s\nTo:   %s\nSubj: %s",
 			m.se.alias, to, subject)),
-		sp:     m.confirm.sp,
-		action: sendUnsubEmailCmd(conn, addr, to, subject),
+		action:    sendUnsubEmailCmd(conn, addr, to, subject),
+		addresses: []string{addr},
 	}
 	return m, nil
 }
@@ -321,11 +321,11 @@ func (m model) confirmTrashAndUnsubSender() (model, tea.Cmd) {
 		body = "No unsubscribe mechanism found — will only trash all emails."
 	}
 	m.confirm = confirmState{
-		active: true,
-		title:  fmt.Sprintf("Trash all + unsubscribe from %s?", addr),
-		body:   body,
-		sp:     m.confirm.sp,
-		action: trashAndUnsubCmd(conn, s.sender),
+		active:    true,
+		title:     fmt.Sprintf("Trash all + unsubscribe from %s?", addr),
+		body:      body,
+		action:    trashAndUnsubCmd(conn, s.sender),
+		addresses: []string{addr},
 	}
 	return m, nil
 }
@@ -340,12 +340,13 @@ func (m model) confirmBatchDelete() (model, tea.Cmd) {
 		return m, nil
 	}
 	senders := itemsToSenders(targets)
+	addrs := senderAddresses(senders)
 	m.confirm = confirmState{
-		active: true,
-		title:  fmt.Sprintf("Trash all emails from %d senders?", len(senders)),
-		body:   "Searches Gmail live — all historical emails from these senders will be moved to Trash.",
-		sp:     m.confirm.sp,
-		action: batchTrashAllCmd(conn, senders),
+		active:    true,
+		title:     fmt.Sprintf("Trash all emails from %d senders?", len(senders)),
+		body:      "Searches Gmail live — all historical emails from these senders will be moved to Trash.",
+		action:    batchTrashAllCmd(conn, senders),
+		addresses: addrs,
 	}
 	return m, nil
 }
@@ -358,12 +359,13 @@ func (m model) confirmBatchTrashAndUnsub() (model, tea.Cmd) {
 		return m, nil
 	}
 	senders := itemsToSenders(targets)
+	addrs := senderAddresses(senders)
 	m.confirm = confirmState{
-		active: true,
-		title:  fmt.Sprintf("Trash all + unsubscribe from %d senders?", len(senders)),
-		body:   "Searches Gmail live — all historical emails trashed. Unsubscribe skipped where unavailable.",
-		sp:     m.confirm.sp,
-		action: batchTrashAndUnsubCmd(conn, senders),
+		active:    true,
+		title:     fmt.Sprintf("Trash all + unsubscribe from %d senders?", len(senders)),
+		body:      "Searches Gmail live — all historical emails trashed. Unsubscribe skipped where unavailable.",
+		action:    batchTrashAndUnsubCmd(conn, senders),
+		addresses: addrs,
 	}
 	return m, nil
 }
@@ -376,12 +378,13 @@ func (m model) confirmBatchUnsub() (model, tea.Cmd) {
 		return m, nil
 	}
 	senders := itemsToSenders(targets)
+	addrs := senderAddresses(senders)
 	m.confirm = confirmState{
-		active: true,
-		title:  fmt.Sprintf("Unsubscribe from %d senders?", len(senders)),
-		body:   "Opens unsubscribe URLs and sends unsubscribe emails where available.",
-		sp:     m.confirm.sp,
-		action: batchUnsubCmd(conn, senders),
+		active:    true,
+		title:     fmt.Sprintf("Unsubscribe from %d senders?", len(senders)),
+		body:      "Opens unsubscribe URLs and sends unsubscribe emails where available.",
+		action:    batchUnsubCmd(conn, senders),
+		addresses: addrs,
 	}
 	return m, nil
 }
@@ -408,6 +411,14 @@ func itemsToSenders(items []senderItem) []db.Sender {
 	out := make([]db.Sender, len(items))
 	for i, it := range items {
 		out[i] = it.sender
+	}
+	return out
+}
+
+func senderAddresses(senders []db.Sender) []string {
+	out := make([]string, len(senders))
+	for i, s := range senders {
+		out[i] = s.Address
 	}
 	return out
 }
@@ -474,7 +485,9 @@ func (m model) viewSenders() string {
 		}
 
 		unsub := "[   ]"
-		if item.sender.UnsubscribeURL != "" {
+		if m.se.pending[item.sender.Address] {
+			unsub = m.se.sp.View() + "    " // spinner (1 char) + 4 spaces = 5 visible
+		} else if item.sender.UnsubscribeURL != "" {
 			unsub = "[URL]"
 		} else if item.sender.UnsubscribeEmail != "" {
 			unsub = "[EML]"

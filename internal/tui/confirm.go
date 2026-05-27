@@ -8,14 +8,6 @@ import (
 )
 
 func (m model) updateConfirm(msg tea.Msg) (tea.Model, tea.Cmd) {
-	if m.confirm.working {
-		// Waiting for action to complete — only allow quit
-		if key, ok := msg.(tea.KeyMsg); ok && key.String() == "ctrl+c" {
-			return m, tea.Quit
-		}
-		return m, nil
-	}
-
 	key, ok := msg.(tea.KeyMsg)
 	if !ok {
 		return m, nil
@@ -24,11 +16,21 @@ func (m model) updateConfirm(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch key.String() {
 	case "y", "enter":
 		if m.confirm.action != nil {
-			m.confirm.working = true
-			return m, tea.Batch(
-				m.confirm.action,
-				m.confirm.sp.Tick,
-			)
+			cmd := m.confirm.action
+			// Mark affected rows as pending before dismissing the modal.
+			if m.se.pending == nil {
+				m.se.pending = make(map[string]bool)
+			}
+			for _, addr := range m.confirm.addresses {
+				m.se.pending[addr] = true
+			}
+			m.confirm.active = false
+			// Kick the senders spinner if there's anything to wait for.
+			var spinCmd tea.Cmd
+			if len(m.se.pending) > 0 {
+				spinCmd = m.se.sp.Tick
+			}
+			return m, tea.Batch(cmd, spinCmd)
 		}
 		m.confirm.active = false
 
@@ -42,19 +44,13 @@ func (m model) updateConfirm(msg tea.Msg) (tea.Model, tea.Cmd) {
 func (m model) viewConfirm() string {
 	var content strings.Builder
 
-	if m.confirm.working {
-		content.WriteString(m.confirm.sp.View() + " Working…\n")
+	content.WriteString(boldStyle.Render(m.confirm.title) + "\n")
+	if m.confirm.body != "" {
 		content.WriteString("\n")
-		content.WriteString(mutedStyle.Render("Please wait…"))
-	} else {
-		content.WriteString(boldStyle.Render(m.confirm.title) + "\n")
-		if m.confirm.body != "" {
-			content.WriteString("\n")
-			content.WriteString(mutedStyle.Render(m.confirm.body) + "\n")
-		}
-		content.WriteString("\n")
-		content.WriteString(renderKeys("y", "confirm", "n", "cancel"))
+		content.WriteString(mutedStyle.Render(m.confirm.body) + "\n")
 	}
+	content.WriteString("\n")
+	content.WriteString(renderKeys("y", "confirm", "n", "cancel"))
 
 	dialog := dialogStyle.Render(content.String())
 

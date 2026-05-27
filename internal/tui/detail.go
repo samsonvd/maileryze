@@ -108,11 +108,11 @@ func (m model) confirmDeleteSelected() (model, tea.Cmd) {
 
 	addr := m.de.sender.Address
 	m.confirm = confirmState{
-		active: true,
-		title:  fmt.Sprintf("Trash %d selected email(s) from %s?", len(ids), addr),
-		body:   "Only the emails you selected in your local database will be trashed.",
-		sp:     m.confirm.sp,
-		action: trashSelectedCmd(conn, addr, ids),
+		active:    true,
+		title:     fmt.Sprintf("Trash %d selected email(s) from %s?", len(ids), addr),
+		body:      "Only the emails you selected in your local database will be trashed.",
+		action:    trashSelectedCmd(conn, addr, ids),
+		addresses: []string{addr},
 	}
 	return m, nil
 }
@@ -130,8 +130,8 @@ func (m model) confirmDeleteAllFromDetail() (model, tea.Cmd) {
 		title:  fmt.Sprintf("Trash ALL emails from %s?", addr),
 		body: "This searches Gmail live — all historical emails from this sender\n" +
 			"will be moved to Trash, not just what's in your local database.",
-		sp:     m.confirm.sp,
-		action: trashAllCmd(conn, addr),
+		action:    trashAllCmd(conn, addr),
+		addresses: []string{addr},
 	}
 	return m, nil
 }
