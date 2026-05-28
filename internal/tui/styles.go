@@ -27,6 +27,9 @@ var (
 	stagedUnsubStyle  = lipgloss.NewStyle().Foreground(colorWarning)
 	stagedDeleteStyle = lipgloss.NewStyle().Foreground(colorDanger)
 
+	// Rows sharing a domain with a staged sender
+	relatedStyle = lipgloss.NewStyle().Foreground(lipgloss.AdaptiveColor{Light: "#0E7490", Dark: "#67E8F9"})
+
 	statusStyle    = lipgloss.NewStyle().Foreground(colorMuted)
 	statusErrStyle = lipgloss.NewStyle().Foreground(colorDanger)
 

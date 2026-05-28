@@ -140,12 +140,27 @@ func (m model) viewTriage() string {
 		subjectW = 10
 	}
 
+	// ── build staged-domain set for related highlighting ──────────────────────
+	stagedDomains := make(map[string]bool, len(m.tr.staged))
+	for addr := range m.tr.staged {
+		if i := strings.LastIndex(addr, "@"); i >= 0 {
+			stagedDomains[addr[i+1:]] = true
+		}
+	}
+
 	// ── rows ──────────────────────────────────────────────────────────────────
 	visH := m.visibleTriageLines()
 	for i := m.tr.scroll; i < m.tr.scroll+visH && i < len(m.tr.senders); i++ {
 		s := m.tr.senders[i]
 		isCursor := i == m.tr.cursor
 		stagedAction, isStaged := m.tr.staged[s.Address]
+
+		var isRelated bool
+		if !isStaged {
+			if j := strings.LastIndex(s.Address, "@"); j >= 0 {
+				isRelated = stagedDomains[s.Address[j+1:]]
+			}
+		}
 
 		cur := "  "
 		if isCursor {
@@ -177,6 +192,8 @@ func (m model) viewTriage() string {
 			b.WriteString(stagedUnsubStyle.Render(line) + "\n")
 		case isStaged && stagedAction == wal.ActionDelete:
 			b.WriteString(stagedDeleteStyle.Render(line) + "\n")
+		case isRelated:
+			b.WriteString(relatedStyle.Render(line) + "\n")
 		default:
 			b.WriteString(line + "\n")
 		}

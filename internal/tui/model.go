@@ -33,9 +33,10 @@ type Sender struct {
 	Name             string
 	Address          string
 	Count            int
-	Subject          string // most recent subject (Gmail returns newest first)
+	Subject          string
 	UnsubscribeURL   string
 	UnsubscribeEmail string
+	LastSeen         time.Time
 }
 
 // senderID returns "Display Name <email>" or just "email" if no display name.
@@ -58,6 +59,7 @@ type fetchProgressMsg struct {
 	total   int
 	done    bool
 	err     error
+	retryIn int // >0: rate-limited; waiting this many seconds before retry
 }
 
 type commitDoneMsg struct {
@@ -68,6 +70,8 @@ type commitDoneMsg struct {
 type executionStartedMsg struct {
 	ch chan executeProgressMsg
 }
+
+type executionCleanedMsg struct{ err error }
 
 type executeProgressMsg struct {
 	address string
@@ -80,15 +84,16 @@ type executeProgressMsg struct {
 // ── state ─────────────────────────────────────────────────────────────────────
 
 type triageState struct {
-	senders    []Sender
-	staged     map[string]wal.Action
-	cursor     int
-	scroll     int
-	fetching   bool
-	fetchTotal int
-	fetchDone  bool
-	fetchCh    chan fetchProgressMsg
-	sp         spinner.Model
+	senders      []Sender
+	staged       map[string]wal.Action
+	cursor       int
+	scroll       int
+	fetching     bool
+	fetchTotal   int
+	fetchDone    bool
+	fetchCh      chan fetchProgressMsg
+	sp           spinner.Model
+	fetchWaiting int // seconds until rate-limit retry resumes (0 = not waiting)
 }
 
 type planState struct {
@@ -97,6 +102,7 @@ type planState struct {
 	done      []string
 	errors    map[string]error
 	sp        spinner.Model
+	scroll    int
 }
 
 type model struct {
@@ -192,6 +198,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, waitForFetchMsg(ch)
 
 	case fetchProgressMsg:
+		if msg.retryIn > 0 {
+			m.tr.fetchWaiting = msg.retryIn
+			return m, waitForFetchMsg(m.tr.fetchCh)
+		}
+		m.tr.fetchWaiting = 0
 		if msg.err != nil {
 			m.tr.fetching = false
 			m.setStatus("fetch error: "+msg.err.Error(), true)
@@ -268,6 +279,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.done {
 			m.pl.executing = false
 			m.setStatus(fmt.Sprintf("execution complete — %d actions", len(m.pl.done)), false)
+			if len(m.pl.done) > 0 {
+				done := make([]string, len(m.pl.done))
+				copy(done, m.pl.done)
+				return m, markExecutedCmd(m.w, done)
+			}
 			return m, nil
 		}
 		m.pl.done = append(m.pl.done, msg.address)
@@ -275,6 +291,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.pl.errors[msg.address] = msg.err
 		}
 		return m, waitForExecMsg(m.pl.execCh)
+
+	case executionCleanedMsg:
+		if msg.err != nil {
+			m.setStatus("warning: could not update plan file: "+msg.err.Error(), true)
+		}
+		return m, nil
 	}
 
 	switch m.screen {
@@ -309,7 +331,11 @@ func renderStatusBar(m model) string {
 	switch m.screen {
 	case screenTriage:
 		if m.tr.fetching {
-			return mutedStyle.Render(fmt.Sprintf("%s fetching… %s emails scanned", m.tr.sp.View(), fmtInt(m.tr.fetchTotal)))
+			s := fmt.Sprintf("%s fetching… %s emails scanned", m.tr.sp.View(), fmtInt(m.tr.fetchTotal))
+			if m.tr.fetchWaiting > 0 {
+				s += fmt.Sprintf(" (rate limited — waiting %ds)", m.tr.fetchWaiting)
+			}
+			return mutedStyle.Render(s)
 		}
 	case screenPlan:
 		if m.pl.executing {
@@ -341,58 +367,100 @@ func startFetchGoroutine(conn connector.WritableConnector, w *wal.WAL, ch chan f
 		ctx := context.Background()
 		start := time.Date(2000, 1, 1, 0, 0, 0, 0, time.UTC)
 		end := time.Now().Add(48 * time.Hour)
-		fetchCh := conn.Fetch(ctx, start, end)
 
 		senders := make(map[string]*Sender)
 		total := 0
 
-		for result := range fetchCh {
-			if result.Err != nil {
+		const maxRetries = 5
+		for attempt := 0; attempt < maxRetries; attempt++ {
+			fetchCh := conn.Fetch(ctx, start, end)
+			var fetchErr error
+
+			for result := range fetchCh {
+				if result.Err != nil {
+					fetchErr = result.Err
+					break
+				}
+
+				addr := result.Value.Sender.Address
+				if addr != "" && !w.IsDecided(addr) {
+					if s, ok := senders[addr]; ok {
+						s.Count++
+						if result.Value.ReceivedAt.After(s.LastSeen) {
+							s.LastSeen = result.Value.ReceivedAt
+						}
+						if s.UnsubscribeURL == "" {
+							s.UnsubscribeURL = result.Value.Unsubscribe.URL
+						}
+						if s.UnsubscribeEmail == "" {
+							s.UnsubscribeEmail = result.Value.Unsubscribe.Email
+						}
+					} else {
+						senders[addr] = &Sender{
+							Name:             result.Value.Sender.Name,
+							Address:          addr,
+							Count:            1,
+							Subject:          result.Value.Subject,
+							UnsubscribeURL:   result.Value.Unsubscribe.URL,
+							UnsubscribeEmail: result.Value.Unsubscribe.Email,
+							LastSeen:         result.Value.ReceivedAt,
+						}
+					}
+				}
+				total++
+
+				if total%50 == 0 {
+					snap := snapshotSenders(senders)
+					select {
+					case ch <- fetchProgressMsg{senders: snap, total: total}:
+					default:
+					}
+				}
+			}
+
+			if fetchErr == nil {
+				snap := snapshotSenders(senders)
 				select {
-				case ch <- fetchProgressMsg{err: result.Err, done: true}:
+				case ch <- fetchProgressMsg{senders: snap, total: total, done: true}:
 				default:
 				}
 				return
 			}
 
-			addr := result.Value.Sender.Address
-			if addr != "" && !w.IsDecided(addr) {
-				if s, ok := senders[addr]; ok {
-					s.Count++
-					if s.UnsubscribeURL == "" {
-						s.UnsubscribeURL = result.Value.Unsubscribe.URL
-					}
-					if s.UnsubscribeEmail == "" {
-						s.UnsubscribeEmail = result.Value.Unsubscribe.Email
-					}
-				} else {
-					senders[addr] = &Sender{
-						Name:             result.Value.Sender.Name,
-						Address:          addr,
-						Count:            1,
-						Subject:          result.Value.Subject,
-						UnsubscribeURL:   result.Value.Unsubscribe.URL,
-						UnsubscribeEmail: result.Value.Unsubscribe.Email,
-					}
-				}
-			}
-			total++
-
-			if total%50 == 0 {
-				snap := snapshotSenders(senders)
+			if !isRateLimitMsg(fetchErr) {
 				select {
-				case ch <- fetchProgressMsg{senders: snap, total: total}:
+				case ch <- fetchProgressMsg{err: fetchErr, done: true}:
 				default:
 				}
+				return
 			}
+
+			waitSec := 5 * (1 << uint(attempt)) // 5, 10, 20, 40, 80
+			if waitSec > 120 {
+				waitSec = 120
+			}
+			select {
+			case ch <- fetchProgressMsg{retryIn: waitSec}:
+			default:
+			}
+			time.Sleep(time.Duration(waitSec) * time.Second)
 		}
 
-		snap := snapshotSenders(senders)
 		select {
-		case ch <- fetchProgressMsg{senders: snap, total: total, done: true}:
+		case ch <- fetchProgressMsg{err: fmt.Errorf("rate limited after multiple retries"), done: true}:
 		default:
 		}
 	}()
+}
+
+func isRateLimitMsg(err error) bool {
+	if err == nil {
+		return false
+	}
+	s := err.Error()
+	return strings.Contains(s, "rateLimitExceeded") ||
+		strings.Contains(s, "RATE_LIMIT_EXCEEDED") ||
+		strings.Contains(s, "Quota exceeded")
 }
 
 func snapshotSenders(m map[string]*Sender) []Sender {
@@ -401,7 +469,7 @@ func snapshotSenders(m map[string]*Sender) []Sender {
 		out = append(out, *s)
 	}
 	sort.Slice(out, func(i, j int) bool {
-		return out[i].Count > out[j].Count
+		return out[i].LastSeen.After(out[j].LastSeen)
 	})
 	return out
 }
@@ -426,6 +494,12 @@ func commitStagedCmd(w *wal.WAL, staged map[string]wal.Action) tea.Cmd {
 			addresses = append(addresses, addr)
 		}
 		return commitDoneMsg{addresses: addresses}
+	}
+}
+
+func markExecutedCmd(w *wal.WAL, addresses []string) tea.Cmd {
+	return func() tea.Msg {
+		return executionCleanedMsg{err: w.MarkExecuted(addresses)}
 	}
 }
 

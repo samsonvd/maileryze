@@ -11,15 +11,17 @@ import (
 type Action string
 
 const (
-	ActionKeep   Action = "keep"
-	ActionUnsub  Action = "unsubscribe"
-	ActionDelete Action = "delete"
+	ActionKeep    Action = "keep"
+	ActionUnsub   Action = "unsubscribe"
+	ActionDelete  Action = "delete"
+	ActionHandled Action = "handled"
 )
 
 type walData struct {
 	Keep        []string `toml:"keep"`
 	Unsubscribe []string `toml:"unsubscribe"`
 	Delete      []string `toml:"delete"`
+	Handled     []string `toml:"handled"`
 }
 
 type WAL struct {
@@ -52,6 +54,9 @@ func Load(path string) (*WAL, error) {
 	for _, addr := range w.data.Delete {
 		w.idx[addr] = ActionDelete
 	}
+	for _, addr := range w.data.Handled {
+		w.idx[addr] = ActionHandled
+	}
 	return w, nil
 }
 
@@ -76,6 +81,22 @@ func (w *WAL) Mark(address string, action Action) error {
 	case ActionDelete:
 		w.data.Delete = append(w.data.Delete, address)
 		w.idx[address] = ActionDelete
+	}
+	return w.save()
+}
+
+// MarkExecuted moves addresses from the unsubscribe/delete sections into
+// handled, persisting the change. Handled addresses remain in the index so
+// the triage screen continues to filter them out.
+func (w *WAL) MarkExecuted(addresses []string) error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
+	for _, addr := range addresses {
+		w.data.Unsubscribe = removeStr(w.data.Unsubscribe, addr)
+		w.data.Delete = removeStr(w.data.Delete, addr)
+		w.data.Handled = append(w.data.Handled, addr)
+		w.idx[addr] = ActionHandled
 	}
 	return w.save()
 }

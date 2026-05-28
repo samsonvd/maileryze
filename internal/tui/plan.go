@@ -7,6 +7,16 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 )
 
+func (m model) visiblePlanLines() int {
+	const headerLines = 2 // title + divider
+	const footerLines = 3 // divider + key-hints + status-bar
+	v := m.height - headerLines - footerLines
+	if v < 1 {
+		return 1
+	}
+	return v
+}
+
 func (m model) updatePlan(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
@@ -17,6 +27,20 @@ func (m model) updatePlan(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "tab", "esc":
 			m.screen = screenTriage
 			return m, nil
+
+		case "up", "k":
+			if m.pl.scroll > 0 {
+				m.pl.scroll--
+			}
+
+		case "down", "j":
+			m.pl.scroll++
+
+		case "g":
+			m.pl.scroll = 0
+
+		case "G":
+			m.pl.scroll = 1<<31 - 1 // clamped in viewPlan
 
 		case "e":
 			if !m.pl.executing {
@@ -46,65 +70,83 @@ func (m model) startExecution() (model, tea.Cmd) {
 func (m model) viewPlan() string {
 	var b strings.Builder
 
+	// ── title ─────────────────────────────────────────────────────────────────
 	keep, unsub, del := m.w.Counts()
 	total := keep + unsub + del
-
 	title := fmt.Sprintf("Plan — %s  ·  %d decisions", m.alias, total)
 	b.WriteString(titleStyle.Render(title) + "\n")
 	b.WriteString(divider(m.width) + "\n")
 
+	// ── collect scrollable content lines ─────────────────────────────────────
+	var lines []string
+
 	if total == 0 {
-		b.WriteString("\n  " + mutedStyle.Render("No decisions yet — triage senders in the main screen [tab].") + "\n")
+		lines = append(lines, "")
+		lines = append(lines, "  "+mutedStyle.Render("No decisions yet — triage senders in the main screen [tab]."))
 	} else {
 		keepAddrs := m.w.KeepAddresses()
 		unsubAddrs := m.w.UnsubAddresses()
 		delAddrs := m.w.DeleteAddresses()
 
-		if len(keepAddrs) > 0 {
-			b.WriteString("\n")
-			b.WriteString(successStyle.Render(fmt.Sprintf("  Keep (%d)", len(keepAddrs))) + "\n")
-			for _, addr := range keepAddrs {
-				b.WriteString(fmt.Sprintf("    %s\n", addr))
-			}
-		}
 		if len(unsubAddrs) > 0 {
-			b.WriteString("\n")
-			b.WriteString(warningStyle.Render(fmt.Sprintf("  Unsubscribe (%d)", len(unsubAddrs))) + "\n")
+			lines = append(lines, "")
+			lines = append(lines, warningStyle.Render(fmt.Sprintf("  Unsubscribe (%d)", len(unsubAddrs))))
 			for _, addr := range unsubAddrs {
-				b.WriteString(fmt.Sprintf("    %s\n", addr))
+				lines = append(lines, fmt.Sprintf("    %s", addr))
 			}
 		}
 		if len(delAddrs) > 0 {
-			b.WriteString("\n")
-			b.WriteString(dangerStyle.Render(fmt.Sprintf("  Delete + Unsubscribe (%d)", len(delAddrs))) + "\n")
+			lines = append(lines, "")
+			lines = append(lines, dangerStyle.Render(fmt.Sprintf("  Delete + Unsubscribe (%d)", len(delAddrs))))
 			for _, addr := range delAddrs {
-				b.WriteString(fmt.Sprintf("    %s\n", addr))
+				lines = append(lines, fmt.Sprintf("    %s", addr))
+			}
+		}
+		if len(keepAddrs) > 0 {
+			lines = append(lines, "")
+			lines = append(lines, successStyle.Render(fmt.Sprintf("  Keep (%d)", len(keepAddrs))))
+			for _, addr := range keepAddrs {
+				lines = append(lines, fmt.Sprintf("    %s", addr))
 			}
 		}
 
 		if m.pl.executing {
-			b.WriteString("\n")
-			b.WriteString(fmt.Sprintf("  %s executing… %d / %d done\n",
+			lines = append(lines, "")
+			lines = append(lines, fmt.Sprintf("  %s executing… %d / %d done",
 				m.pl.sp.View(), len(m.pl.done), len(unsubAddrs)+len(delAddrs)))
 		} else if len(m.pl.done) > 0 {
-			b.WriteString("\n")
-			b.WriteString(successStyle.Render(fmt.Sprintf("  %d actions executed", len(m.pl.done))) + "\n")
+			lines = append(lines, "")
+			lines = append(lines, successStyle.Render(fmt.Sprintf("  %d actions executed", len(m.pl.done))))
 			if len(m.pl.errors) > 0 {
-				b.WriteString(dangerStyle.Render(fmt.Sprintf("  %d errors", len(m.pl.errors))) + "\n")
+				lines = append(lines, dangerStyle.Render(fmt.Sprintf("  %d errors", len(m.pl.errors))))
 			}
 		}
 	}
 
-	b.WriteString("\n")
-	b.WriteString(mutedStyle.Render(fmt.Sprintf(
-		"  Edit: ~/.config/maileryze/%s_plan.toml", m.alias)) + "\n")
-	b.WriteString("\n")
-	b.WriteString(divider(m.width) + "\n")
+	lines = append(lines, "")
+	lines = append(lines, mutedStyle.Render(fmt.Sprintf("  Edit: ~/.config/maileryze/%s_plan.toml", m.alias)))
+	lines = append(lines, "")
 
+	// ── render visible window ─────────────────────────────────────────────────
+	visH := m.visiblePlanLines()
+	scroll := m.pl.scroll
+	if maxScroll := max(0, len(lines)-visH); scroll > maxScroll {
+		scroll = maxScroll
+	}
+	end := scroll + visH
+	if end > len(lines) {
+		end = len(lines)
+	}
+	for _, line := range lines[scroll:end] {
+		b.WriteString(line + "\n")
+	}
+
+	// ── footer ────────────────────────────────────────────────────────────────
+	b.WriteString(divider(m.width) + "\n")
 	if m.pl.executing {
 		b.WriteString(renderKeys("tab", "triage", "q", "quit") + "\n")
 	} else {
-		b.WriteString(renderKeys("e", "execute", "tab", "triage", "q", "quit") + "\n")
+		b.WriteString(renderKeys("↑↓/kj", "scroll", "e", "execute", "tab", "triage", "q", "quit") + "\n")
 	}
 	b.WriteString(renderStatusBar(m))
 

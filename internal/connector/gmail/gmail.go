@@ -99,7 +99,7 @@ func (g *GmailConnector) Fetch(ctx context.Context, start, end time.Time) <-chan
 			start.Format("2006/01/02"),
 			end.Format("2006/01/02"))
 
-		const concurrency = 15
+		const concurrency = 5
 		sem := make(chan struct{}, concurrency)
 		var wg sync.WaitGroup
 
@@ -117,13 +117,28 @@ func (g *GmailConnector) Fetch(ctx context.Context, start, end time.Time) <-chan
 						defer wg.Done()
 						defer func() { <-sem }()
 
-						msg, err := g.service.Users.Messages.Get("me", id).
-							Format("metadata").
-							MetadataHeaders("Subject", "From", "List-Unsubscribe").
-							Context(ctx).
-							Do()
-						if err != nil {
-							return // skip individual failures silently
+						var msg *googleGmail.Message
+						for attempt := 0; attempt < 4; attempt++ {
+							var err error
+							msg, err = g.service.Users.Messages.Get("me", id).
+								Format("metadata").
+								MetadataHeaders("Subject", "From", "List-Unsubscribe").
+								Context(ctx).
+								Do()
+							if err == nil {
+								break
+							}
+							if !isRateLimitErr(err) || ctx.Err() != nil {
+								return
+							}
+							select {
+							case <-time.After(time.Duration(1<<uint(attempt)) * time.Second):
+							case <-ctx.Done():
+								return
+							}
+						}
+						if msg == nil {
+							return
 						}
 						select {
 						case ch <- connector.Result[connector.EmailContent[any]]{Value: parseMessage(msg)}:
@@ -250,6 +265,16 @@ func parseSender(from string) connector.EmailSender {
 		return connector.EmailSender{Address: from}
 	}
 	return connector.EmailSender{Name: addr.Name, Address: addr.Address}
+}
+
+func isRateLimitErr(err error) bool {
+	if err == nil {
+		return false
+	}
+	s := err.Error()
+	return strings.Contains(s, "rateLimitExceeded") ||
+		strings.Contains(s, "RATE_LIMIT_EXCEEDED") ||
+		strings.Contains(s, "Quota exceeded")
 }
 
 // parseUnsubscribe handles the List-Unsubscribe header format:
