@@ -125,8 +125,9 @@ func (m model) viewTriage() string {
 		return b.String()
 	}
 
-	// ── column geometry: cur(2) stg(1) sp(1) sender(senderW) gap(2) subject(rest)
-	const overhead = 6
+	// ── column geometry: cur(2) stg(1) sp(1) sender(senderW) gap(2) date(6) gap(2) subject(rest)
+	const dateW = 6
+	const overhead = 6 + dateW + 2
 	available := m.width - overhead
 	senderW := available * 2 / 5
 	if senderW > 45 {
@@ -181,7 +182,8 @@ func (m model) viewTriage() string {
 
 		sender := truncate(senderID(s), senderW)
 		subject := truncate(s.Subject, subjectW)
-		line := fmt.Sprintf("%s%s %-*s  %s", cur, stgMark, senderW, sender, subject)
+		date := s.LastSeen.Format("02-Jan")
+		line := fmt.Sprintf("%s%s %-*s  %-*s  %s", cur, stgMark, senderW, sender, dateW, date, subject)
 
 		switch {
 		case isCursor:
