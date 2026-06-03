@@ -4,6 +4,8 @@ Sort out your email clutter by seeing who is creating it and then deleting it.
 
 All data is fetched live and kept in memory - no persistence, no caching, no external services.
 
+_This is a TUI built with [Bubble Tea](https://github.com/charmbracelet/bubbletea)._
+
 ## Usage
 
 ### Configuration
@@ -48,6 +50,8 @@ Build from source:
 ```sh
 go install github.com/samsonvd/maileryze@latest
 ```
+
+For detailed instructions on how to use maileryze, see the [USAGE.md](USAGE.md) file.
 
 ## Development setup
 
