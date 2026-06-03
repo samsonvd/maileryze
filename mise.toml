@@ -8,7 +8,7 @@ run = "go run ./main.go {{arg()}}"
 
 [tasks.build]
 description = "Build the binary"
-run = "go build -o maileryze ./..."
+run = "go build  -ldflags \"-X main.Version=$(svu current)-$(date +%Y-%m-%d)\" -o maileryze ."
 
 [tasks.test]
 description = "Run tests"
